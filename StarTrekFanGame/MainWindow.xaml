@@ -1,0 +1,76 @@
+﻿<Window x:Class="StarTrekFanGame.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="Star Trek Fan Game" Height="580" Width="940"
+        PreviewKeyDown="Window_KeyDown"
+        PreviewKeyUp="Window_KeyUp">
+
+    <Grid Background="Black">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="55"/>
+        </Grid.RowDefinitions>
+
+        <!-- Game canvas. A fixed 960x540 "virtual" resolution drives all game
+             logic; the Viewbox uniformly scales the whole scene to the window,
+             so every entity grows/shrinks together with the window size. -->
+        <Viewbox Grid.Row="0" Stretch="Uniform">
+            <Canvas Name="ShapeCanvas"
+                    Width="960" Height="540"
+                    Background="Black"
+                    Cursor="Cross"
+                    SizeChanged="ShapeCanvas_SizeChanged"
+                    Loaded="ShapeCanvas_Loaded"
+                    MouseMove="ShapeCanvas_MouseMove"
+                    MouseLeftButtonDown="ShapeCanvas_MouseLeftButtonDown"
+                    MouseLeftButtonUp="ShapeCanvas_MouseLeftButtonUp"/>
+        </Viewbox>
+
+        <!-- Control bar -->
+        <WrapPanel Grid.Row="1"
+                   VerticalAlignment="Center"
+                   HorizontalAlignment="Center"
+                   Margin="4 0">
+
+            <!-- Spawn / Clear -->
+            <Button Name="SpawnButton"  Width="80"  Height="30" Margin="3 0"
+                    Click="SpawnButton_Click">Spawn</Button>
+            <Button Name="ClearButton"  Width="58"  Height="30" Margin="3 0"
+                    Click="ClearButton_Click">Clear</Button>
+
+            <Separator Width="1" Height="26" Margin="6 0"/>
+
+            <!-- Playback -->
+            <Button Name="PlayButton"  Width="58"  Height="30" Margin="3 0"
+                    Click="PlayButton_Click">&#x25BA; Play</Button>
+            <Button Name="StepButton"  Width="46"  Height="30" Margin="3 0"
+                    Click="StepButton_Click">Step</Button>
+            <Button Name="StopButton"  Width="58"  Height="30" Margin="3 0"
+                    Click="StopButton_Click">&#x25A0; Stop</Button>
+
+            <Separator Width="1" Height="26" Margin="6 0"/>
+
+            <!-- Fire mode -->
+            <Button Name="RifleButton"      Width="64"  Height="30" Margin="3 0" FontWeight="Bold"
+                    Click="RifleButton_Click">Rifle</Button>
+            <Button Name="MachineGunButton" Width="82"  Height="30" Margin="3 0"
+                    Click="MachineGunButton_Click">MachGun</Button>
+            <Button Name="ShootButton"      Width="60"  Height="30" Margin="3 0"
+                    Background="#CC2200" Foreground="White" FontWeight="Bold"
+                    Click="ShootButton_Click">Fire!</Button>
+
+            <Separator Width="1" Height="26" Margin="6 0"/>
+
+            <!-- Score -->
+            <TextBlock Name="ScoreText"
+                       Text="Score: 0"
+                       Foreground="DarkGreen"
+                       FontSize="14" FontWeight="Bold"
+                       VerticalAlignment="Center"
+                       Margin="6 0"/>
+        </WrapPanel>
+    </Grid>
+</Window>

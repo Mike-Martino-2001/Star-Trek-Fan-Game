@@ -1,0 +1,29 @@
+{
+  "group_id": null,
+  "objects": [
+    {
+      "id": "8cbf3d08-1e2b-4ea7-834d-37fd3ec1122e",
+      "name": null,
+      "prompt": "Starship with warp engines",
+      "size": {
+        "width": 136,
+        "height": 136
+      },
+      "directions": 8,
+      "view": "low top-down",
+      "rotations": {
+        "south": "rotations/south.png",
+        "south-east": "rotations/south-east.png",
+        "east": "rotations/east.png",
+        "north-east": "rotations/north-east.png",
+        "north": "rotations/north.png",
+        "north-west": "rotations/north-west.png",
+        "west": "rotations/west.png",
+        "south-west": "rotations/south-west.png"
+      },
+      "animations": {}
+    }
+  ],
+  "export_version": "1.0",
+  "export_date": "2026-06-18T01:40:06.455614"
+}

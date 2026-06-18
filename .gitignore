@@ -1,0 +1,17 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio
+.vs/
+*.user
+
+# Rider / others
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local tooling
+.claude/

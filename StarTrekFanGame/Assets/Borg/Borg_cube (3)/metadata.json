@@ -1,0 +1,22 @@
+{
+  "group_id": null,
+  "objects": [
+    {
+      "id": "f914d7e8-57a5-4e16-9dfa-9ccd9bfaedb1",
+      "name": null,
+      "prompt": "Borg cube",
+      "size": {
+        "width": 128,
+        "height": 128
+      },
+      "directions": 1,
+      "view": "low top-down",
+      "rotations": {
+        "unknown": "rotations/unknown.png"
+      },
+      "animations": {}
+    }
+  ],
+  "export_version": "1.0",
+  "export_date": "2026-06-18T01:34:19.965892"
+}

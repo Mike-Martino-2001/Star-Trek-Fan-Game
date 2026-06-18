@@ -1,0 +1,22 @@
+{
+  "group_id": null,
+  "objects": [
+    {
+      "id": "df7653cd-4a7d-4a39-b757-b56f0156e60c",
+      "name": null,
+      "prompt": "Borg sphere",
+      "size": {
+        "width": 128,
+        "height": 128
+      },
+      "directions": 1,
+      "view": "low top-down",
+      "rotations": {
+        "unknown": "rotations/unknown.png"
+      },
+      "animations": {}
+    }
+  ],
+  "export_version": "1.0",
+  "export_date": "2026-06-18T01:33:53.865710"
+}
