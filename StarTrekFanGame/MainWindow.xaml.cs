@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
@@ -39,7 +40,15 @@ namespace StarTrekFanGame
         // -- Levels -----------------------------------------------------------
         private int _level = 1;
         private bool _levelStarted = false;     // a level has shapes to clear
-        private int  _warpCountdown = 0;        // frames until the next level loads
+
+        // Level-transition phases: ship glides to base, then hyperspace screen shows.
+        private enum WarpPhase { None, SlideToBase, Hyperspace }
+        private WarpPhase _warpPhase = WarpPhase.None;
+        private int       _warpTimer = 0;
+        private const int WarpSlideFrames      = 60;   // ticks to glide ship (~2 s at 30 fps)
+        private const int WarpHyperspaceFrames = 90;   // ticks of hyperspace screen (~3 s)
+        private static readonly BitmapImage HyperspaceImage =
+            LoadImage("Assets/Backgrounds/hyperspace.png");
 
         private static readonly string[] BackgroundFiles =
         {
@@ -58,6 +67,16 @@ namespace StarTrekFanGame
             "Assets/Backgrounds/background_13.png",
             "Assets/Backgrounds/background_14.png",
             "Assets/Backgrounds/background_15.png",
+            "Assets/Backgrounds/background_16.png",
+            "Assets/Backgrounds/background_17.png",
+            "Assets/Backgrounds/background_18.png",
+            "Assets/Backgrounds/background_19.png",
+            "Assets/Backgrounds/background_20.png",
+            "Assets/Backgrounds/background_21.png",
+            "Assets/Backgrounds/background_22.png",
+            "Assets/Backgrounds/background_23.png",
+            "Assets/Backgrounds/background_24.png",
+            "Assets/Backgrounds/background_25.png",
         };
         private readonly ImageBrush?[] _backgroundCache = new ImageBrush?[BackgroundFiles.Length];
 
@@ -108,7 +127,7 @@ namespace StarTrekFanGame
         //  Each game object owns one WPF element that is created once and then
         //  only repositioned each frame. This avoids rebuilding the whole visual
         //  tree (and the GC pressure that caused the periodic stutter).
-        private sealed class BulletVisual { public Line Trail = null!; public Image Sprite = null!; }
+        private sealed class BulletVisual { public Line Trail = null!; public FrameworkElement Sprite = null!; }
 
         private readonly Dictionary<GameShape, FrameworkElement> _shapeVisuals    = new();
         private readonly Dictionary<ExplosionParticle, Ellipse>  _particleVisuals = new();
@@ -386,9 +405,13 @@ namespace StarTrekFanGame
 
         private void StartLevel(int level)
         {
-            _level         = level;
-            _levelStarted  = true;
-            _warpCountdown = 0;
+            _level           = level;
+            _levelStarted    = true;
+            _warpPhase       = WarpPhase.None;
+            _warpTimer       = 0;
+            _ship.Visibility = Visibility.Visible;
+            _lastMoveSprite  = ShipN;
+            _ship.Source     = ShipN;
             ShapeCanvas.Background = GetBackground((level - 1) % BackgroundFiles.Length);
             SpawnShapes(4 + level * 2);   // more targets each level
         }
@@ -503,20 +526,29 @@ namespace StarTrekFanGame
 
             _frame++;   // drives the continuous low-health damage flash
 
-            // -- 1. Move ship (WASD keys) -------------------------------------
-            if (_aKey) Model.Gun.GunX -= GunMoveSpeed;
-            if (_dKey) Model.Gun.GunX += GunMoveSpeed;
-            if (_wKey) Model.Gun.GunY -= GunMoveSpeed;
-            if (_sKey) Model.Gun.GunY += GunMoveSpeed;
+            // -- 1. Move ship (WASD keys) — blocked during level transitions --
+            if (_warpPhase == WarpPhase.None)
+            {
+                if (_aKey) Model.Gun.GunX -= GunMoveSpeed;
+                if (_dKey) Model.Gun.GunX += GunMoveSpeed;
+                if (_wKey) Model.Gun.GunY -= GunMoveSpeed;
+                if (_sKey) Model.Gun.GunY += GunMoveSpeed;
+            }
+            else if (_warpPhase == WarpPhase.SlideToBase)
+            {
+                // Smoothly lerp toward bottom-centre each tick.
+                Model.Gun.GunX += (cw / 2              - Model.Gun.GunX) * 0.12;
+                Model.Gun.GunY += (ch - GunBaseOffset  - Model.Gun.GunY) * 0.12;
+            }
 
             double minY = ShipSize / 2 + 6;
             double maxY = ch - GunBaseOffset;
             Model.Gun.GunX = Math.Clamp(Model.Gun.GunX, 40, cw - 40);
             Model.Gun.GunY = Math.Clamp(Model.Gun.GunY, minY, maxY);
 
-            // -- 2. Machine-gun auto-fire -------------------------------------
+            // -- 2. Machine-gun auto-fire — blocked during level transitions --
             Model.Gun.Tick();
-            if (FireHeld && Model.Gun.MachineGunMode && Model.Gun.CanFire())
+            if (_warpPhase == WarpPhase.None && FireHeld && Model.Gun.MachineGunMode && Model.Gun.CanFire())
             {
                 FireBullet();
                 Model.Gun.ResetFireCooldown();
@@ -680,13 +712,30 @@ namespace StarTrekFanGame
             if (_muzzleFlash > 0) _muzzleFlash--;
 
             // -- 8b. Level progression ----------------------------------------
-            // When the field is cleared, pause briefly ("warp") then load the
-            // next level with its own background and more shapes.
-            if (_levelStarted && Model.Shapes.Count == 0 && _warpCountdown == 0)
-                _warpCountdown = 120;               // ~2 s at 60 FPS
+            // Phase 1 (SlideToBase): ship glides to bottom-centre (movement driven
+            // in section 1 above). Phase 2 (Hyperspace): background swaps to the
+            // hyperspace image and the ship hides until StartLevel is called.
+            if (_levelStarted && Model.Shapes.Count == 0 && _warpPhase == WarpPhase.None)
+            {
+                _warpPhase      = WarpPhase.SlideToBase;
+                _warpTimer      = WarpSlideFrames;
+                _lastMoveSprite = ShipS;   // ship faces downward during the glide-out
+            }
 
-            if (_warpCountdown > 0 && --_warpCountdown == 0)
+            if (_warpPhase == WarpPhase.SlideToBase && --_warpTimer <= 0)
+            {
+                // Snap to exact position, then cut to hyperspace.
+                Model.Gun.GunX   = cw / 2;
+                Model.Gun.GunY   = ch - GunBaseOffset;
+                _warpPhase       = WarpPhase.Hyperspace;
+                _warpTimer       = WarpHyperspaceFrames;
+                ShapeCanvas.Background = new ImageBrush(HyperspaceImage) { Stretch = Stretch.UniformToFill };
+                _ship.Visibility = Visibility.Collapsed;
+            }
+            else if (_warpPhase == WarpPhase.Hyperspace && --_warpTimer <= 0)
+            {
                 StartLevel(_level + 1);
+            }
         }
 
         // --------------------------------------------------------------------
@@ -921,19 +970,27 @@ namespace StarTrekFanGame
 
                 if (!_bulletVisuals.TryGetValue(b, out var bv))
                 {
-                    var sprite = new Image
+                    var sprite = new Rectangle
                     {
-                        Width = tw, Height = TorpedoSize, Source = TorpedoSprite,
+                        Width       = tw,
+                        Height      = TorpedoSize,
+                        Fill        = Brushes.OrangeRed,
+                        OpacityMask = new ImageBrush(TorpedoSprite) { Stretch = Stretch.Fill },
+                        Effect      = new DropShadowEffect
+                        {
+                            Color       = Color.FromRgb(255, 30, 0),
+                            ShadowDepth = 0,
+                            BlurRadius  = 14,
+                            Opacity     = 1.0
+                        },
                         RenderTransformOrigin = new Point(0.5, 0.5),
-                        // Torpedo art points "up"; rotate it onto the flight path.
                         RenderTransform = new RotateTransform(
                             Math.Atan2(b.VX, -b.VY) * 180.0 / Math.PI)
                     };
-                    RenderOptions.SetBitmapScalingMode(sprite, BitmapScalingMode.NearestNeighbor);
 
                     bv = new BulletVisual
                     {
-                        Trail  = new Line { Stroke = Brushes.Yellow, StrokeThickness = 1.5, Opacity = 0.7 },
+                        Trail  = new Line { Stroke = Brushes.OrangeRed, StrokeThickness = 2.0, Opacity = 0.75 },
                         Sprite = sprite
                     };
                     _bulletVisuals[b] = bv;
@@ -1076,12 +1133,20 @@ namespace StarTrekFanGame
                 Canvas.SetLeft(_hudClear, cw / 2 - 285);
                 Canvas.SetTop(_hudClear,  ch / 2 - 30);
             }
-            else if (_warpCountdown > 0)
+            else if (_warpPhase == WarpPhase.SlideToBase)
             {
                 _hudClear.Visibility = Visibility.Visible;
                 _hudClear.Foreground = Brushes.GreenYellow;
-                _hudClear.Text = $"LEVEL {_level} CLEARED  -  warping to level {_level + 1}...";
+                _hudClear.Text = $"LEVEL {_level} CLEARED  -  engaging warp drive...";
                 Canvas.SetLeft(_hudClear, cw / 2 - 230);
+                Canvas.SetTop(_hudClear,  ch / 2 - 30);
+            }
+            else if (_warpPhase == WarpPhase.Hyperspace)
+            {
+                _hudClear.Visibility = Visibility.Visible;
+                _hudClear.Foreground = Brushes.Cyan;
+                _hudClear.Text = $">> ENTERING LEVEL {_level + 1} <<";
+                Canvas.SetLeft(_hudClear, cw / 2 - 160);
                 Canvas.SetTop(_hudClear,  ch / 2 - 30);
             }
             else
