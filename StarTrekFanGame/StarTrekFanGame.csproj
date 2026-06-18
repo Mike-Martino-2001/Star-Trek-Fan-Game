@@ -5,12 +5,15 @@
     <TargetFramework>net10.0-windows7.0</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWPF>true</UseWPF>
+    <ApplicationIcon>Assets\Icons\startrek_logo_icon_256x256.ico</ApplicationIcon>
   </PropertyGroup>
 
-  <!-- Images are embedded in the assembly and loaded via pack:// URIs. -->
+  <!-- Images and icons are embedded in the assembly and loaded via pack:// URIs. -->
   <ItemGroup>
     <None Remove="Assets\**\*.png" />
     <Resource Include="Assets\**\*.png" />
+    <None Remove="Assets\Icons\*.ico" />
+    <Resource Include="Assets\Icons\*.ico" />
   </ItemGroup>
 
   <!-- Audio is copied next to the .exe; MediaPlayer needs a real file path. -->

@@ -5,6 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title="Star Trek Fan Game" Height="580" Width="940" WindowState="Maximized"
+        Icon="Assets/Icons/startrek_logo_icon_48x48.ico"
         PreviewKeyDown="Window_KeyDown"
         PreviewKeyUp="Window_KeyUp"
         Deactivated="Window_Deactivated">
