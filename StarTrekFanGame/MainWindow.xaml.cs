@@ -61,21 +61,45 @@ namespace StarTrekFanGame
         };
         private readonly ImageBrush?[] _backgroundCache = new ImageBrush?[BackgroundFiles.Length];
 
-        // -- Game timer (~60 FPS) ---------------------------------------------
-        // Render priority keeps ticks from being starved behind background work
-        // (the parameterless DispatcherTimer defaults to Background priority,
-        //  which causes ticks to bunch up and stutter under load).
-        private readonly DispatcherTimer _gameTimer = new DispatcherTimer(DispatcherPriority.Render)
-        {
-            Interval = TimeSpan.FromMilliseconds(16)
-        };
+        // -- Game loop (vsync-aligned, fixed timestep) ------------------------
+        //  Driven by CompositionTarget.Rendering instead of a DispatcherTimer:
+        //  the callback is part of WPF's render pass, so it stays aligned with
+        //  the monitor refresh and never starves keyboard/mouse input the way a
+        //  Render-priority timer did. A fixed-timestep accumulator advances the
+        //  simulation at exactly LogicTicksPerSecond regardless of how fast the
+        //  display refreshes (so the game runs at the same speed on a 60 Hz or
+        //  144 Hz screen), and is clamped so a hitch can't trigger a spiral.
+        //
+        //  This is set to ~30 Hz to match the game's original feel: the old
+        //  DispatcherTimer asked for 16 ms but, at Windows' default ~15.6 ms
+        //  timer granularity, actually fired at roughly half that rate. All the
+        //  movement/cooldown constants were tuned against that effective rate,
+        //  so the simulation runs here at the same speed. Raise this single
+        //  value to speed the whole game up, lower it to slow it down.
+        private const double LogicTicksPerSecond = 30.0;
+        private const double FixedStepMs         = 1000.0 / LogicTicksPerSecond;
+        private const int    MaxStepsPerFrame    = 5;
+        private bool     _running        = false;
+        private bool     _loopPrimed     = false;   // first frame seeds the clock
+        private TimeSpan _lastRenderTime = TimeSpan.Zero;
+        private double   _stepAccumMs    = 0.0;
 
         // -- Keyboard state ---------------------------------------------------
         private bool _aKey    = false;   // move ship left
         private bool _dKey    = false;   // move ship right
         private bool _wKey    = false;   // move ship up
         private bool _sKey    = false;   // move ship down
-        private bool _fireKey = false;
+
+        // Fire is held from two independent sources (keyboard Space and the
+        // left mouse button); the gun fires while either is down. Tracking them
+        // separately stops one source's release from clearing the other's hold.
+        private bool _fireKeyHeld   = false;
+        private bool _fireMouseHeld = false;
+        private bool FireHeld => _fireKeyHeld || _fireMouseHeld;
+
+		// -- Pause state ------------------------------------------------------
+		private bool _paused     = false;
+		private bool _wasRunning = false;   // timer state captured on pause open
 
         // -- Muzzle-flash counter (frames remaining) ---------------------------
         private int _muzzleFlash = 0;
@@ -91,7 +115,15 @@ namespace StarTrekFanGame
         private readonly Dictionary<Bullet, BulletVisual>        _bulletVisuals   = new();
 
         // Shared, frozen sprite sources (loaded once).
-        private static readonly BitmapImage ShipSprite    = LoadImage("Assets/spaceship/spaceship/rotations/north.png");
+        // Eight compass-direction ship sprites - one per WASD movement direction.
+        private static readonly BitmapImage ShipN  = LoadImage("Assets/spaceship/spaceship/rotations/north.png");
+        private static readonly BitmapImage ShipNE = LoadImage("Assets/spaceship/spaceship/rotations/north-east.png");
+        private static readonly BitmapImage ShipE  = LoadImage("Assets/spaceship/spaceship/rotations/east.png");
+        private static readonly BitmapImage ShipSE = LoadImage("Assets/spaceship/spaceship/rotations/south-east.png");
+        private static readonly BitmapImage ShipS  = LoadImage("Assets/spaceship/spaceship/rotations/south.png");
+        private static readonly BitmapImage ShipSW = LoadImage("Assets/spaceship/spaceship/rotations/south-west.png");
+        private static readonly BitmapImage ShipW  = LoadImage("Assets/spaceship/spaceship/rotations/west.png");
+        private static readonly BitmapImage ShipNW = LoadImage("Assets/spaceship/spaceship/rotations/north-west.png");
         private static readonly BitmapImage TorpedoSprite = LoadImage("Assets/Ammo/torpedo.png");
 
         // Borg sprites: each 2D shape renders as its 3D Borg counterpart.
@@ -112,9 +144,18 @@ namespace StarTrekFanGame
         // Free-running frame counter, drives the continuous low-health flash.
         private int _frame;
 
+        // Last values pushed to the HUD text blocks. The HUD updates every frame
+        // but these change rarely, so we skip the string interpolation (and its
+        // per-frame allocations) unless the underlying value actually moved.
+        private int  _shownScore  = int.MinValue;
+        private int  _shownShapes = int.MinValue;
+        private int  _shownLevel  = int.MinValue;
+        private bool _shownMg     = false;
+        private bool _shownMgInit = false;
+
         // Persistent "chrome" visuals (player ship + HUD), created once in the ctor.
-        private readonly Image     _ship      = new() { Width = ShipSize, Height = ShipSize, Source = ShipSprite, RenderTransformOrigin = new Point(0.5, 0.5) };
-        private readonly RotateTransform _shipRotation = new();
+        private BitmapImage _lastMoveSprite = ShipN;
+        private readonly Image _ship = new() { Width = ShipSize, Height = ShipSize, Source = ShipN };
         private readonly Ellipse   _gunFlash  = new() { Visibility = Visibility.Collapsed };
         private readonly TextBlock _hudScore  = new() { FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Brushes.Yellow };
         private readonly TextBlock _hudShapes = new() { FontSize = 11, FontWeight = FontWeights.Bold, Foreground = Brushes.LightGray };
@@ -132,7 +173,16 @@ namespace StarTrekFanGame
         private readonly TextBlock _heatText = new() { FontSize = 10, FontWeight = FontWeights.Bold };
 
         // Z-order layers (Canvas draws by ZIndex, so insertion order no longer matters).
-        private const int ZShape = 0, ZParticle = 1, ZBullet = 2, ZGun = 3, ZHud = 4;
+        private const int ZShape = 0, ZParticle = 1, ZBullet = 2, ZGun = 3, ZHud = 4, ZReticle = 5;
+
+        // -- Aiming reticle ---------------------------------------------------
+        //  Replaces the hard-to-see system "Cross" cursor with a bright, drawn
+        //  crosshair that scales with the Viewbox and sits above everything.
+        //  Each stroke is drawn twice (dark backing + bright top) so it stays
+        //  readable over both dark and bright backgrounds.
+        private static readonly SolidColorBrush ReticleColor   = Frozen(255,  60, 255,  90);  // neon green
+        private static readonly SolidColorBrush ReticleOutline = Frozen(210,   0,   0,   0);
+        private readonly Canvas _reticle = new() { IsHitTestVisible = false };
 
         // -- Cached frozen brushes (allocated once; safe to share across threads) --
         private static readonly SolidColorBrush ParticleFill  = Frozen(255, 255, 160,  0);
@@ -151,8 +201,8 @@ namespace StarTrekFanGame
         public MainWindow()
         {
             InitializeComponent();
-            _gameTimer.Tick += (_, _) => Step();
             BuildChrome();
+            BuildReticle();
         }
 
         // Create the persistent player-ship + HUD visuals exactly once.
@@ -162,8 +212,7 @@ namespace StarTrekFanGame
             _hudHint.Foreground = HintFill;
             _hudHint.Text  = "WASD Move   |   Mouse Aim   |   Click / Space = Shoot";
 
-            // Keep the pixel-art ship crisp while it rotates.
-            _ship.RenderTransform = _shipRotation;
+            // Keep the pixel-art ship crisp.
             RenderOptions.SetBitmapScalingMode(_ship, BitmapScalingMode.NearestNeighbor);
 
             AddChrome(_ship,      ZGun);
@@ -214,6 +263,56 @@ namespace StarTrekFanGame
                 RenderTransform = new TranslateTransform()
             };
         }
+
+        // Build the crosshair once: a backing (dark, thick) pass under a bright,
+        // thinner pass, so the reticle reads clearly on any background.
+        private void BuildReticle()
+        {
+            AddReticleStrokes(ReticleOutline, 3.0);
+            AddReticleStrokes(ReticleColor,   1.5);
+
+            // Centre dot (bright, on top).
+            var dot = new Ellipse { Width = 2, Height = 2, Fill = ReticleColor };
+            Canvas.SetLeft(dot, -1.0);
+            Canvas.SetTop(dot,  -1.0);
+            _reticle.Children.Add(dot);
+
+            _reticle.Visibility = Visibility.Collapsed;   // shown once the cursor enters
+            AddChrome(_reticle, ZReticle);
+
+            // Park it at the canvas centre until the first mouse move.
+            Canvas.SetLeft(_reticle, 480);
+            Canvas.SetTop(_reticle,  270);
+        }
+
+        // One crosshair pass: four gapped arms plus a ring, all drawn relative to
+        // the reticle's origin (the container Canvas is moved to the cursor).
+        private void AddReticleStrokes(Brush stroke, double thickness)
+        {
+            const double gap = 3.0, arm = 8.0, ring = 6.5;
+            _reticle.Children.Add(MakeReticleLine(0, -arm, 0, -gap, stroke, thickness));
+            _reticle.Children.Add(MakeReticleLine(0,  gap, 0,  arm, stroke, thickness));
+            _reticle.Children.Add(MakeReticleLine(-arm, 0, -gap, 0, stroke, thickness));
+            _reticle.Children.Add(MakeReticleLine( gap, 0,  arm, 0, stroke, thickness));
+
+            var circle = new Ellipse
+            {
+                Width = ring * 2, Height = ring * 2,
+                Stroke = stroke, StrokeThickness = thickness
+            };
+            Canvas.SetLeft(circle, -ring);
+            Canvas.SetTop(circle,  -ring);
+            _reticle.Children.Add(circle);
+        }
+
+        private static Line MakeReticleLine(double x1, double y1, double x2, double y2,
+                                            Brush stroke, double thickness) => new Line
+        {
+            X1 = x1, Y1 = y1, X2 = x2, Y2 = y2,
+            Stroke = stroke, StrokeThickness = thickness,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap   = PenLineCap.Round
+        };
 
         // -- Image / background helpers ---------------------------------------
         private static BitmapImage LoadImage(string relativePath)
@@ -317,7 +416,72 @@ namespace StarTrekFanGame
         private void GameOver()
         {
             _gameOver = true;
-            _gameTimer.Stop();
+            StopLoop();
+        }
+
+        // --------------------------------------------------------------------
+        //  GAME LOOP DRIVER  (CompositionTarget.Rendering + fixed timestep)
+        // --------------------------------------------------------------------
+        private void StartLoop()
+        {
+            if (_running) return;
+            _running        = true;
+            _loopPrimed     = false;   // re-seed the clock so a long pause isn't replayed
+            _stepAccumMs    = 0.0;
+            CompositionTarget.Rendering += OnRendering;
+        }
+
+        private void StopLoop()
+        {
+            if (!_running) return;
+            _running = false;
+            CompositionTarget.Rendering -= OnRendering;
+        }
+
+        private void OnRendering(object? sender, EventArgs e)
+        {
+            if (!_running) return;
+
+            TimeSpan now = ((RenderingEventArgs)e).RenderingTime;
+
+            // First frame after Start: seed the clock, draw once, advance nothing.
+            if (!_loopPrimed)
+            {
+                _loopPrimed     = true;
+                _lastRenderTime = now;
+                Render();
+                return;
+            }
+
+            double elapsedMs = (now - _lastRenderTime).TotalMilliseconds;
+            if (elapsedMs <= 0) return;   // Rendering can fire twice with one timestamp
+            _lastRenderTime = now;
+
+            _stepAccumMs += elapsedMs;
+
+            int steps = 0;
+            while (_stepAccumMs >= FixedStepMs && steps < MaxStepsPerFrame)
+            {
+                Step();
+                _stepAccumMs -= FixedStepMs;
+                steps++;
+                if (_gameOver) break;     // GameOver() stops the loop mid-batch
+            }
+
+            // After a hitch we'd be many steps behind; drop the debt rather than
+            // sprinting to catch up (which would look like a fast-forward).
+            if (steps >= MaxStepsPerFrame) _stepAccumMs = 0.0;
+
+            // Always draw the frame we just simulated, including the final frame
+            // when GameOver() stopped the loop mid-batch (so the banner shows).
+            Render();
+        }
+
+        // One logic tick + redraw, for the manual "Step" button while stopped.
+        private void StepOnce()
+        {
+            Step();
+            Render();
         }
 
         private void ShapeCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -352,7 +516,7 @@ namespace StarTrekFanGame
 
             // -- 2. Machine-gun auto-fire -------------------------------------
             Model.Gun.Tick();
-            if (_fireKey && Model.Gun.MachineGunMode && Model.Gun.CanFire())
+            if (FireHeld && Model.Gun.MachineGunMode && Model.Gun.CanFire())
             {
                 FireBullet();
                 Model.Gun.ResetFireCooldown();
@@ -523,9 +687,6 @@ namespace StarTrekFanGame
 
             if (_warpCountdown > 0 && --_warpCountdown == 0)
                 StartLevel(_level + 1);
-
-            // -- 9. Render ----------------------------------------------------
-            Render();
         }
 
         // --------------------------------------------------------------------
@@ -801,6 +962,22 @@ namespace StarTrekFanGame
         }
 
         // -- Player ship visual -----------------------------------------------
+        // Returns the directional sprite matching the current WASD input.
+        // Falls back to the last-used direction when no key is held.
+        private BitmapImage PickMoveSprite()
+        {
+            bool n = _wKey, s = _sKey, e = _dKey, w = _aKey;
+            if (!n && !s && !e && !w) return _lastMoveSprite;
+            if (n && e) return _lastMoveSprite = ShipNE;
+            if (n && w) return _lastMoveSprite = ShipNW;
+            if (s && e) return _lastMoveSprite = ShipSE;
+            if (s && w) return _lastMoveSprite = ShipSW;
+            if (n)      return _lastMoveSprite = ShipN;
+            if (s)      return _lastMoveSprite = ShipS;
+            if (e)      return _lastMoveSprite = ShipE;
+            return           _lastMoveSprite = ShipW;
+        }
+
         private void UpdateGun(double cw, double ch)
         {
             double gx   = Model.Gun.GunX;
@@ -809,8 +986,8 @@ namespace StarTrekFanGame
             double tipX = gx + Math.Sin(rad) * BarrelLength;
             double tipY = gy - Math.Cos(rad) * BarrelLength;
 
-            // Ship sprite points "up" at angle 0; rotate it to the aim angle.
-            _shipRotation.Angle = Model.Gun.Angle;
+            // Update the ship sprite to match the current movement direction.
+            _ship.Source = PickMoveSprite();
             Canvas.SetLeft(_ship, gx - ShipSize / 2);
             Canvas.SetTop(_ship,  gy - ShipSize / 2);
 
@@ -839,18 +1016,35 @@ namespace StarTrekFanGame
         {
             bool mg = Model.Gun.MachineGunMode;
 
-            _hudScore.Text  = $"Score: {Model.Score}";
-            _hudShapes.Text = $"Shapes: {Model.Shapes.Count}";
+            if (_shownScore != Model.Score)
+            {
+                _shownScore    = Model.Score;
+                _hudScore.Text = $"Score: {Model.Score}";
+            }
+            if (_shownShapes != Model.Shapes.Count)
+            {
+                _shownShapes    = Model.Shapes.Count;
+                _hudShapes.Text = $"Shapes: {Model.Shapes.Count}";
+            }
 
             // Shield pips: filled while intact, hollow once spent.
             for (int i = 0; i < _shieldPips.Length; i++)
                 _shieldPips[i].Fill = i < _health ? Brushes.Aqua : null;
 
-            _hudLevel.Text = $"LEVEL {_level}";
+            if (_shownLevel != _level)
+            {
+                _shownLevel    = _level;
+                _hudLevel.Text = $"LEVEL {_level}";
+            }
             Canvas.SetLeft(_hudLevel, cw / 2 - 30);
 
-            _hudMode.Text       = mg ? "? MACHINE GUN" : "? RIFLE";
-            _hudMode.Foreground = mg ? Brushes.OrangeRed : Brushes.LightGreen;
+            if (!_shownMgInit || _shownMg != mg)
+            {
+                _shownMgInit        = true;
+                _shownMg            = mg;
+                _hudMode.Text       = mg ? "MACHINE GUN" : "RIFLE";
+                _hudMode.Foreground = mg ? Brushes.OrangeRed : Brushes.LightGreen;
+            }
             Canvas.SetLeft(_hudMode, cw - 135);
 
             Canvas.SetLeft(_hudHint, cw - 270);
@@ -862,16 +1056,15 @@ namespace StarTrekFanGame
             {
                 bool   over = Model.Gun.Overheated;
                 double heat = Model.Gun.Heat;
-                double barLeft = cw - HeatBarW - 14;
 
-                Canvas.SetLeft(_heatBg,   barLeft); Canvas.SetTop(_heatBg,   48);
-                Canvas.SetLeft(_heatFill, barLeft); Canvas.SetTop(_heatFill, 48);
+                Canvas.SetLeft(_heatBg,   12); Canvas.SetTop(_heatBg,   88);
+                Canvas.SetLeft(_heatFill, 12); Canvas.SetTop(_heatFill, 88);
                 _heatFill.Width = heat * HeatBarW;
                 _heatFill.Fill  = over ? Brushes.Red : heat > 0.6 ? Brushes.Orange : Brushes.Cyan;
 
                 _heatText.Text       = over ? "OVERHEAT!" : "HEAT";
                 _heatText.Foreground = over ? Brushes.Red : Brushes.LightGray;
-                Canvas.SetLeft(_heatText, barLeft); Canvas.SetTop(_heatText, 33);
+                Canvas.SetLeft(_heatText, 12); Canvas.SetTop(_heatText, 75);
             }
 
             // Centre banner: game over takes priority, then the inter-level warp.
@@ -900,10 +1093,18 @@ namespace StarTrekFanGame
         // --------------------------------------------------------------------
         //  KEYBOARD
         // --------------------------------------------------------------------
-        private void Window_KeyDown(object sender, KeyEventArgs e)
-        {
-            switch (e.Key)
-            {
+		private void Window_KeyDown(object sender, KeyEventArgs e)
+		{
+			if (e.Key == Key.Escape)
+			{
+				if (_paused) ClosePauseMenu();
+				else         OpenPauseMenu();
+				e.Handled = true;
+				return;
+			}
+			if (_paused) return;
+			switch (e.Key)
+			{
                 case Key.A:
                     _aKey     = true;
                     e.Handled = true;
@@ -921,8 +1122,8 @@ namespace StarTrekFanGame
                     e.Handled = true;
                     break;
                 case Key.Space:
-                    _fireKey  = true;
-                    e.Handled = true;
+                    _fireKeyHeld = true;
+                    e.Handled    = true;
                     // Rifle: fire once per press (ignore key-repeat)
                     if (!e.IsRepeat && !Model.Gun.MachineGunMode && Model.Gun.CanFire())
                     {
@@ -933,17 +1134,60 @@ namespace StarTrekFanGame
             }
         }
 
-        private void Window_KeyUp(object sender, KeyEventArgs e)
-        {
-            switch (e.Key)
-            {
-                case Key.A:     _aKey     = false; e.Handled = true; break;
-                case Key.D:     _dKey     = false; e.Handled = true; break;
-                case Key.W:     _wKey     = false; e.Handled = true; break;
-                case Key.S:     _sKey     = false; e.Handled = true; break;
-                case Key.Space: _fireKey  = false; e.Handled = true; break;
-            }
-        }
+		private void Window_KeyUp(object sender, KeyEventArgs e)
+		{
+			switch (e.Key)
+			{
+				case Key.A:     _aKey        = false; e.Handled = true; break;
+				case Key.D:     _dKey        = false; e.Handled = true; break;
+				case Key.W:     _wKey        = false; e.Handled = true; break;
+				case Key.S:     _sKey        = false; e.Handled = true; break;
+				case Key.Space: _fireKeyHeld = false; e.Handled = true; break;
+			}
+		}
+
+		// Window lost focus (alt-tab, click another app) while keys were held:
+		// their KeyUp goes to the other window, so clear everything to avoid a
+		// latched key (e.g. the ship drifting or the machine gun firing forever).
+		private void Window_Deactivated(object? sender, EventArgs e)
+		{
+			_aKey = _dKey = _wKey = _sKey = false;
+			_fireKeyHeld = _fireMouseHeld = false;
+		}
+
+		// --------------------------------------------------------------------
+		//  PAUSE MENU
+		// --------------------------------------------------------------------
+		private void OpenPauseMenu()
+		{
+			_paused     = true;
+			_wasRunning = _running;
+			StopLoop();
+			_aKey = _dKey = _wKey = _sKey = false;
+			_fireKeyHeld = _fireMouseHeld = false;
+			PauseOverlay.Visibility = Visibility.Visible;
+		}
+
+		private void ClosePauseMenu()
+		{
+			_paused = false;
+			PauseOverlay.Visibility = Visibility.Collapsed;
+			if (_wasRunning) StartLoop();
+		}
+
+		private void ResumeButton_Click(object sender, RoutedEventArgs e) => ClosePauseMenu();
+
+		private void MusicSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		{
+			_audio.MusicVolume = e.NewValue / 100.0;
+			if (MusicPct != null) MusicPct.Text = $"{(int)e.NewValue}%";
+		}
+
+		private void SfxSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+		{
+			_audio.SfxVolume = e.NewValue / 100.0;
+			if (SfxPct != null) SfxPct.Text = $"{(int)e.NewValue}%";
+		}
 
         // --------------------------------------------------------------------
         //  TOOLBAR HANDLERS
@@ -963,10 +1207,10 @@ namespace StarTrekFanGame
         private void PlayButton_Click(object sender, RoutedEventArgs e)
         {
             if (_gameOver) NewGame();   // a fresh game after defeat
-            _gameTimer.Start();
+            StartLoop();
         }
-        private void StepButton_Click(object sender, RoutedEventArgs e)  => Step();
-        private void StopButton_Click(object sender, RoutedEventArgs e)  => _gameTimer.Stop();
+        private void StepButton_Click(object sender, RoutedEventArgs e)  => StepOnce();
+        private void StopButton_Click(object sender, RoutedEventArgs e)  => StopLoop();
 
         private void ShootButton_Click(object sender, RoutedEventArgs e)
         {
@@ -974,20 +1218,20 @@ namespace StarTrekFanGame
             {
                 FireBullet();
                 Model.Gun.ResetFireCooldown();
-                if (!_gameTimer.IsEnabled) Render();
+                if (!_running) Render();
             }
         }
 
         private void RotateLeft_Click(object sender, RoutedEventArgs e)
         {
             Model.Gun.Angle = WrapAngle(Model.Gun.Angle - 10);
-            if (!_gameTimer.IsEnabled) Render();
+            if (!_running) Render();
         }
 
         private void RotateRight_Click(object sender, RoutedEventArgs e)
         {
             Model.Gun.Angle = WrapAngle(Model.Gun.Angle + 10);
-            if (!_gameTimer.IsEnabled) Render();
+            if (!_running) Render();
         }
 
         // Keep the angle in (-180, 180] so it never drifts off to large values.
@@ -1009,18 +1253,36 @@ namespace StarTrekFanGame
             double dy = Model.Gun.GunY - mp.Y;       // positive = cursor above ship
             Model.Gun.Angle = Math.Atan2(dx, dy) * 180.0 / Math.PI;
 
-            if (!_gameTimer.IsEnabled) Render();
+            // Move the drawn crosshair to the cursor (and show it if a MouseEnter
+            // was missed because the cursor was already over the canvas at start).
+            Canvas.SetLeft(_reticle, mp.X);
+            Canvas.SetTop(_reticle,  mp.Y);
+            if (_reticle.Visibility != Visibility.Visible)
+                _reticle.Visibility = Visibility.Visible;
+
+            if (!_running) Render();
         }
+
+        private void ShapeCanvas_MouseEnter(object sender, MouseEventArgs e)
+            => _reticle.Visibility = Visibility.Visible;
+
+        private void ShapeCanvas_MouseLeave(object sender, MouseEventArgs e)
+            => _reticle.Visibility = Visibility.Collapsed;
 
         private void ShapeCanvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            _fireKey = true;
+            _fireMouseHeld = true;
+            // Capture the mouse so the matching button-up is always delivered to
+            // the canvas, even if the cursor leaves it while held. Without this the
+            // release is lost and the machine gun keeps firing until the next click.
+            ShapeCanvas.CaptureMouse();
+
             // Rifle fires immediately on click; machine gun is handled by Step()
             if (!Model.Gun.MachineGunMode && Model.Gun.CanFire())
             {
                 FireBullet();
                 Model.Gun.ResetFireCooldown();
-                if (!_gameTimer.IsEnabled) Render();
+                if (!_running) Render();
             }
             // Keep focus on window so A/D keyboard still works
             this.Focus();
@@ -1028,7 +1290,15 @@ namespace StarTrekFanGame
 
         private void ShapeCanvas_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
         {
-            _fireKey = false;
+            _fireMouseHeld = false;
+            if (ShapeCanvas.IsMouseCaptured) ShapeCanvas.ReleaseMouseCapture();
+        }
+
+        // Capture can also be lost without a button-up (e.g. focus stolen);
+        // clear the hold so fire never latches on.
+        private void ShapeCanvas_LostMouseCapture(object sender, MouseEventArgs e)
+        {
+            _fireMouseHeld = false;
         }
 
         private void RifleButton_Click(object sender, RoutedEventArgs e)
@@ -1037,7 +1307,7 @@ namespace StarTrekFanGame
             Model.Gun.ResetHeat();
             RifleButton.FontWeight      = FontWeights.Bold;
             MachineGunButton.FontWeight = FontWeights.Normal;
-            if (!_gameTimer.IsEnabled) Render();
+            if (!_running) Render();
         }
 
         private void MachineGunButton_Click(object sender, RoutedEventArgs e)
@@ -1046,7 +1316,7 @@ namespace StarTrekFanGame
             Model.Gun.ResetHeat();
             MachineGunButton.FontWeight = FontWeights.Bold;
             RifleButton.FontWeight      = FontWeights.Normal;
-            if (!_gameTimer.IsEnabled) Render();
+            if (!_running) Render();
         }
     }
 }

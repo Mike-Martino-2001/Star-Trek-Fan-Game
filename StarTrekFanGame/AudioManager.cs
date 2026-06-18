@@ -34,13 +34,13 @@ namespace StarTrekFanGame
         {
             // Theme: open once, then restart 10 s after every natural end.
             _music.Open(AudioUri("StarTrekTheNextGeneration.mp3"));
-            _music.Volume = 0.40;
+            _music.Volume = 0.20;
             _loopGap = new DispatcherTimer { Interval = TimeSpan.FromSeconds(10) };
             _loopGap.Tick += (_, _) => { _loopGap.Stop(); PlayTheme(); };
             _music.MediaEnded += (_, _) => _loopGap.Start();
 
-            _torpedoVoices   = BuildVoices("torpedo_fire.mp3", 6, 0.55);
-            _explosionVoices = BuildVoices("explosion.mp3",    4, 0.85);
+            _torpedoVoices   = BuildVoices("torpedo_fire.mp3", 6, 0.20);
+            _explosionVoices = BuildVoices("explosion.mp3",    4, 0.20);
         }
 
         // Pre-open a set of players for one effect so playback is latency-free.
@@ -66,7 +66,25 @@ namespace StarTrekFanGame
             _music.Play();
         }
 
-        public void PlayTorpedo()   => PlayOneShot(_torpedoVoices,   ref _torpedoIndex);
+		/// <summary>Gets or sets the music volume (0.0 to 1.0).</summary>
+		public double MusicVolume
+		{
+			get => _music.Volume;
+			set => _music.Volume = value;
+		}
+
+		/// <summary>Gets or sets the SFX volume for all torpedo and explosion voices (0.0 to 1.0).</summary>
+		public double SfxVolume
+		{
+			get => _torpedoVoices[0].Volume;
+			set
+			{
+				foreach (var v in _torpedoVoices)   v.Volume = value;
+				foreach (var v in _explosionVoices) v.Volume = value;
+			}
+		}
+
+		public void PlayTorpedo()   => PlayOneShot(_torpedoVoices,   ref _torpedoIndex);
         public void PlayExplosion() => PlayOneShot(_explosionVoices, ref _explosionIndex);
 
         private static void PlayOneShot(MediaPlayer[] voices, ref int index)

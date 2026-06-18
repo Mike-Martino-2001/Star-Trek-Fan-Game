@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -19,6 +19,18 @@
     <Content Include="Assets\Audio\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+
+  <!-- Defensively exclude any empty stub files that tools sometimes drop into a
+       nested StarTrekFanGame subfolder. The real MainWindow.xaml lives at the
+       project root and is picked up automatically by the WPF SDK. -->
+  <ItemGroup>
+    <Compile Remove="StarTrekFanGame\**\*" />
+    <Page Remove="StarTrekFanGame\**\*" />
+    <None Remove="StarTrekFanGame\**\*" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="StarTrekFanGame\MainWindow.xaml.cs" />
   </ItemGroup>
 
 </Project>
