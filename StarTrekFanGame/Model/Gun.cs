@@ -1,37 +1,36 @@
 namespace StarTrekFanGame.Model
 {
     /// <summary>
-    /// Represents the player's cannon: angle, fire mode, and fire-rate cooldown.
+    /// Represents the player's cannon: angle, fire-rate cooldown, and torpedo heat.
     /// Angle 0 = straight up; positive = clockwise (right).
+    /// Both phasers and torpedoes are always available simultaneously.
     /// </summary>
     class Gun
     {
-        public double Angle          = 0.0;   // degrees; 0 = straight up
-        public double GunX           = 0.0;   // horizontal position on canvas (pixels)
-        public double GunY           = 0.0;   // vertical position on canvas (pixels)
-        public bool   MachineGunMode = false;
+        public double Angle = 0.0;   // degrees; 0 = straight up
+        public double GunX  = 0.0;   // horizontal position on canvas (pixels)
+        public double GunY  = 0.0;   // vertical position on canvas (pixels)
 
-        // Rifle fires every 12 ticks (~400 ms at 30 FPS); machine-gun every 6 ticks.
-        public int FireRate => MachineGunMode ? 6 : 12;
+        // Torpedo fires every 12 ticks (~400 ms at 30 FPS); phasers are continuous.
+        public int FireRate => 12;
 
         private int _cooldown = 0;
 
-        // -- Machine-gun overheat (0 = cool, 1 = fully overheated) ------------
+        // -- Photon-torpedo overheat (0 = cool, 1 = fully overheated) ---------
         public double Heat       = 0.0;
         public bool   Overheated = false;
 
-        private const double HeatPerShot  = 0.15;   // added each machine-gun shot
-        private const double CoolPerTick  = 0.010;  // dissipated every tick
-        private const double RecoverBelow = 0.0;   // can fire again once cooled to here
+        private const double HeatPerShot  = 0.22;   // added per torpedo shot
+        private const double CoolPerTick  = 0.008;  // dissipated every tick
+        private const double RecoverBelow = 0.15;   // can fire again once cooled to here
 
-        // The machine gun is locked out while overheated; the rifle never overheats.
-        public bool CanFire()           => _cooldown <= 0 && !(MachineGunMode && Overheated);
+        // Torpedo is locked out while overheated.
+        public bool CanFire()           => _cooldown <= 0 && !Overheated;
         public void ResetFireCooldown() => _cooldown = FireRate;
 
-        /// <summary>Builds heat for one shot (machine-gun mode only).</summary>
+        /// <summary>Builds heat for one torpedo shot.</summary>
         public void AddHeat()
         {
-            if (!MachineGunMode) return;
             Heat += HeatPerShot;
             if (Heat >= 1.0) { Heat = 1.0; Overheated = true; }
         }

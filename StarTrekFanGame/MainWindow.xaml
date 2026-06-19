@@ -10,6 +10,43 @@
         PreviewKeyUp="Window_KeyUp"
         Deactivated="Window_Deactivated">
 
+    <Window.Resources>
+        <Style x:Key="StButton" TargetType="Button">
+            <Setter Property="Background"      Value="#0D2137"/>
+            <Setter Property="Foreground"      Value="#00BFFF"/>
+            <Setter Property="BorderBrush"     Value="#00BFFF"/>
+            <Setter Property="BorderThickness" Value="1.5"/>
+            <Setter Property="FontSize"        Value="13"/>
+            <Setter Property="FontWeight"      Value="Bold"/>
+            <Setter Property="Cursor"          Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3">
+                            <Border x:Name="Overlay" Background="Transparent" CornerRadius="3">
+                                <ContentPresenter HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"
+                                                  TextElement.Foreground="{TemplateBinding Foreground}"/>
+                            </Border>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Overlay" Property="Background" Value="#22FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Overlay" Property="Background" Value="#33000000"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
     <Grid Background="Black">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
@@ -30,53 +67,25 @@
                     MouseEnter="ShapeCanvas_MouseEnter"
                     MouseLeave="ShapeCanvas_MouseLeave"
                     MouseLeftButtonDown="ShapeCanvas_MouseLeftButtonDown"
-                    MouseLeftButtonUp="ShapeCanvas_MouseLeftButtonUp"
-                    LostMouseCapture="ShapeCanvas_LostMouseCapture"/>
+                        MouseLeftButtonUp="ShapeCanvas_MouseLeftButtonUp"
+                        MouseRightButtonDown="ShapeCanvas_MouseRightButtonDown"
+                        MouseRightButtonUp="ShapeCanvas_MouseRightButtonUp"
+                        LostMouseCapture="ShapeCanvas_LostMouseCapture"/>
         </Viewbox>
 
-        <!-- Control bar -->
-        <WrapPanel Grid.Row="1"
-                   VerticalAlignment="Center"
-                   HorizontalAlignment="Center"
-                   Margin="4 0">
+		<!-- Control bar -->
+		<Border Grid.Row="1" Background="#050D1A" BorderBrush="#00BFFF" BorderThickness="0 1 0 0">
+			<WrapPanel VerticalAlignment="Center"
+					   HorizontalAlignment="Center"
+					   Margin="4 0">
 
-            <!-- Spawn / Clear -->
-            <Button Name="SpawnButton"  Width="80"  Height="30" Margin="3 0"
-                    Click="SpawnButton_Click">Spawn</Button>
-            <Button Name="ClearButton"  Width="58"  Height="30" Margin="3 0"
-                    Click="ClearButton_Click">Clear</Button>
+				<!-- Playback -->
+				<Button Name="PlayButton" Width="80" Height="32" Margin="5 0"
+						Style="{StaticResource StButton}"
+						Click="PlayButton_Click">&#x25BA; PLAY</Button>
 
-            <Separator Width="1" Height="26" Margin="6 0"/>
-
-            <!-- Playback -->
-            <Button Name="PlayButton"  Width="58"  Height="30" Margin="3 0"
-                    Click="PlayButton_Click">&#x25BA; Play</Button>
-            <Button Name="StepButton"  Width="46"  Height="30" Margin="3 0"
-                    Click="StepButton_Click">Step</Button>
-            <Button Name="StopButton"  Width="58"  Height="30" Margin="3 0"
-                    Click="StopButton_Click">&#x25A0; Stop</Button>
-
-            <Separator Width="1" Height="26" Margin="6 0"/>
-
-            <!-- Fire mode -->
-            <Button Name="RifleButton"      Width="64"  Height="30" Margin="3 0" FontWeight="Bold"
-                    Click="RifleButton_Click">Rifle</Button>
-            <Button Name="MachineGunButton" Width="82"  Height="30" Margin="3 0"
-                    Click="MachineGunButton_Click">MachGun</Button>
-            <Button Name="ShootButton"      Width="60"  Height="30" Margin="3 0"
-                    Background="#CC2200" Foreground="White" FontWeight="Bold"
-                    Click="ShootButton_Click">Fire!</Button>
-
-            <Separator Width="1" Height="26" Margin="6 0"/>
-
-            <!-- Score -->
-            <TextBlock Name="ScoreText"
-                       Text="Score: 0"
-                       Foreground="DarkGreen"
-                       FontSize="14" FontWeight="Bold"
-                       VerticalAlignment="Center"
-                       Margin="6 0"/>
-		</WrapPanel>
+			</WrapPanel>
+		</Border>
 
 		<!-- Pause overlay (ESC to open / close) -->
 		<Grid x:Name="PauseOverlay" Grid.Row="0" Visibility="Collapsed" Panel.ZIndex="20">

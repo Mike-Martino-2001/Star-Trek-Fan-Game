@@ -1,4 +1,4 @@
-using StarTrekFanGame.Model;
+﻿using StarTrekFanGame.Model;
 using System;
 using System.Collections.Generic;
 using System.Windows;
@@ -123,15 +123,21 @@ namespace StarTrekFanGame
         // -- Muzzle-flash counter (frames remaining) ---------------------------
         private int _muzzleFlash = 0;
 
+        // -- Phaser damage tick: toggles 0/1 each frame; damage only applied on
+        //    even ticks, halving DPS relative to 1 HP every tick. ---------------
+        private int _phaserDamageTick = 0;
+
         // -- Retained visuals -------------------------------------------------
         //  Each game object owns one WPF element that is created once and then
         //  only repositioned each frame. This avoids rebuilding the whole visual
         //  tree (and the GC pressure that caused the periodic stutter).
         private sealed class BulletVisual { public Line Trail = null!; public FrameworkElement Sprite = null!; }
 
-        private readonly Dictionary<GameShape, FrameworkElement> _shapeVisuals    = new();
-        private readonly Dictionary<ExplosionParticle, Ellipse>  _particleVisuals = new();
-        private readonly Dictionary<Bullet, BulletVisual>        _bulletVisuals   = new();
+        private readonly Dictionary<GameShape, FrameworkElement> _shapeVisuals      = new();
+        private readonly Dictionary<ExplosionParticle, Ellipse>  _particleVisuals   = new();
+        private readonly Dictionary<Bullet, BulletVisual>        _bulletVisuals     = new();
+        private readonly Dictionary<EnemyBullet, Ellipse>        _enemyBulletVisuals = new();
+        private readonly Dictionary<GameShape, Ellipse>          _shieldVisuals     = new();
 
         // Shared, frozen sprite sources (loaded once).
         // Eight compass-direction ship sprites - one per WASD movement direction.
@@ -160,6 +166,20 @@ namespace StarTrekFanGame
         // Red damage flash: how long a single hit flashes for (frames).
         private const int HitFlashFrames = 9;
 
+        // -- Enemy AI constants -----------------------------------------------
+        // Size-tier thresholds (SizeTier with 4 tiers, range 18-50):
+        //   tier 0 (~18-26): ShieldGenerator   tier 1 (~26-34): ShieldGenerator
+        //   tier 2 (~34-42): Fighter           tier 3 (~42-50): Spawner
+        private const int SpawnerTier      = 3;   // largest tier
+        private const int FighterTier      = 2;   // medium tier
+        // tiers 0 and 1 → ShieldGenerator
+
+        private const int SpawnerCooldown  = 300; // ticks between spawns (~10 s)
+        private const int FighterCooldown  = 90;  // ticks between bursts (~3 s)
+        private const int ShieldRadius     = 80;  // px — how close a generator must be to shield an ally
+        private const double EnemyBulletSpeed = 3.5;
+        private const int   FighterSpread  = 3;   // number of projectiles per burst
+
         // Free-running frame counter, drives the continuous low-health flash.
         private int _frame;
 
@@ -169,8 +189,6 @@ namespace StarTrekFanGame
         private int  _shownScore  = int.MinValue;
         private int  _shownShapes = int.MinValue;
         private int  _shownLevel  = int.MinValue;
-        private bool _shownMg     = false;
-        private bool _shownMgInit = false;
 
         // Persistent "chrome" visuals (player ship + HUD), created once in the ctor.
         private BitmapImage _lastMoveSprite = ShipN;
@@ -181,15 +199,29 @@ namespace StarTrekFanGame
         private readonly TextBlock _hudShields = new() { FontSize = 11, FontWeight = FontWeights.Bold, Foreground = Brushes.Aqua };
         private readonly Polygon[] _shieldPips = new Polygon[MaxHealth];
         private readonly TextBlock _hudLevel  = new() { FontSize = 14, FontWeight = FontWeights.Bold, Foreground = Brushes.Aqua };
-        private readonly TextBlock _hudMode   = new() { FontSize = 12, FontWeight = FontWeights.Bold };
-        private readonly TextBlock _hudHint   = new() { FontSize = 10, FontWeight = FontWeights.Bold };
         private readonly TextBlock _hudClear  = new() { FontSize = 26, FontWeight = FontWeights.Bold, Foreground = Brushes.GreenYellow, Visibility = Visibility.Collapsed };
 
-        // Machine-gun heat gauge (top-right, only shown in machine-gun mode).
+        // Photon-torpedo heat gauge (top-left, always visible).
         private const double HeatBarW = 150.0;
         private readonly Rectangle _heatBg   = new() { Width = HeatBarW, Height = 9, Stroke = Brushes.Gray, StrokeThickness = 1, Fill = Frozen(90, 0, 0, 0) };
         private readonly Rectangle _heatFill = new() { Height = 9 };
         private readonly TextBlock _heatText = new() { FontSize = 10, FontWeight = FontWeights.Bold };
+
+        // Phaser beam visuals (outer glow + bright core + impact sparks; all retained on canvas).
+        private static readonly SolidColorBrush PhaserBrush     = Frozen(255, 255, 80, 20);
+        private static readonly SolidColorBrush PhaserCoreBrush = Frozen(255, 255, 240, 180);  // warm white core
+        private readonly Line    _phaserBeamL = new() { StrokeThickness = 3.5 };
+        private readonly Line    _phaserBeamR = new() { StrokeThickness = 3.5 };
+        private readonly Line    _phaserCoreL = new() { StrokeThickness = 1.5 };
+        private readonly Line    _phaserCoreR = new() { StrokeThickness = 1.5 };
+        private readonly Ellipse _phaserImpL  = new() { Width = 20, Height = 20, RenderTransformOrigin = new Point(0.5, 0.5) };
+        private readonly Ellipse _phaserImpR  = new() { Width = 20, Height = 20, RenderTransformOrigin = new Point(0.5, 0.5) };
+
+        // Phaser tuning constants.
+        private const double PhaserConvergeDist = 220.0;  // px ahead of ship centre where beams meet
+        private const double PhaserSpread       = 16.0;   // perpendicular offset at the emitter
+        private const int    PhaserDamageEvery  = 6;      // ticks between phaser damage applications
+        private int _phaserDamageCooldown = 0;
 
         // Z-order layers (Canvas draws by ZIndex, so insertion order no longer matters).
         private const int ZShape = 0, ZParticle = 1, ZBullet = 2, ZGun = 3, ZHud = 4, ZReticle = 5;
@@ -228,8 +260,6 @@ namespace StarTrekFanGame
         private void BuildChrome()
         {
             _gunFlash.Fill = FlashFill;
-            _hudHint.Foreground = HintFill;
-            _hudHint.Text  = "WASD Move   |   Mouse Aim   |   Click / Space = Shoot";
 
             // Keep the pixel-art ship crisp.
             RenderOptions.SetBitmapScalingMode(_ship, BitmapScalingMode.NearestNeighbor);
@@ -240,18 +270,36 @@ namespace StarTrekFanGame
             AddChrome(_hudShapes, ZHud);
             AddChrome(_hudShields, ZHud);
             AddChrome(_hudLevel,  ZHud);
-            AddChrome(_hudMode,   ZHud);
-            AddChrome(_hudHint,   ZHud);
             AddChrome(_heatBg,    ZHud);
             AddChrome(_heatFill,  ZHud);   // drawn over the background bar
             AddChrome(_heatText,  ZHud);
             AddChrome(_hudClear,  ZHud);
 
+            // Phaser beams: outer glow, inner core, and terminus impact sparks.
+            _phaserBeamL.Stroke = _phaserBeamR.Stroke = PhaserBrush;
+            _phaserBeamL.Effect = new DropShadowEffect { Color = Color.FromRgb(255, 40, 0), ShadowDepth = 0, BlurRadius = 18, Opacity = 1.0 };
+            _phaserBeamR.Effect = new DropShadowEffect { Color = Color.FromRgb(255, 40, 0), ShadowDepth = 0, BlurRadius = 18, Opacity = 1.0 };
+            _phaserBeamL.Visibility = _phaserBeamR.Visibility = Visibility.Collapsed;
+            AddChrome(_phaserBeamL, ZBullet);
+            AddChrome(_phaserBeamR, ZBullet);
+
+            _phaserCoreL.Stroke = _phaserCoreR.Stroke = PhaserCoreBrush;
+            _phaserCoreL.Visibility = _phaserCoreR.Visibility = Visibility.Collapsed;
+            AddChrome(_phaserCoreL, ZBullet);
+            AddChrome(_phaserCoreR, ZBullet);
+
+            _phaserImpL.Fill   = _phaserImpR.Fill   = PhaserBrush;
+            _phaserImpL.Effect = new DropShadowEffect { Color = Color.FromRgb(255, 120, 0), ShadowDepth = 0, BlurRadius = 22, Opacity = 1.0 };
+            _phaserImpR.Effect = new DropShadowEffect { Color = Color.FromRgb(255, 120, 0), ShadowDepth = 0, BlurRadius = 22, Opacity = 1.0 };
+            _phaserImpL.RenderTransform = new ScaleTransform(1.0, 1.0);
+            _phaserImpR.RenderTransform = new ScaleTransform(1.0, 1.0);
+            _phaserImpL.Visibility = _phaserImpR.Visibility = Visibility.Collapsed;
+            AddChrome(_phaserImpL, ZBullet);
+            AddChrome(_phaserImpR, ZBullet);
+
             // Fixed-position HUD lines
             Canvas.SetLeft(_hudScore, 12);  Canvas.SetTop(_hudScore, 10);
             Canvas.SetLeft(_hudShapes, 12); Canvas.SetTop(_hudShapes, 33);
-            Canvas.SetTop(_hudMode, 10);
-            Canvas.SetTop(_hudHint, 28);
 
             // Shield pips (diamond icons) after the "SHIELDS" label.
             _hudShields.Text = "SHIELDS";
@@ -376,7 +424,7 @@ namespace StarTrekFanGame
         // -- Canvas events ----------------------------------------------------
         private void ShapeCanvas_Loaded(object sender, RoutedEventArgs e)
         {
-            _audio.StartTheme();   // plays for the whole session, looping with a 10 s gap
+            _audio.StartTheme();     // plays for the whole session, looping with a 10 s gap
             NewGame();
             Render();
         }
@@ -391,7 +439,6 @@ namespace StarTrekFanGame
             _invuln   = 0;
             _health   = MaxHealth;
             Model.Score = 0;
-            ScoreText.Text = "Score: 0";
             _ship.Opacity = 1.0;
 
             // Reset the ship to bottom-centre, pointing straight up.
@@ -422,6 +469,8 @@ namespace StarTrekFanGame
             Model.Shapes.Clear();
             Model.Bullets.Clear();
             Model.Particles.Clear();
+            foreach (var eb in Model.EnemyBullets) RemoveEnemyBulletVisual(eb);
+            Model.EnemyBullets.Clear();
 
             foreach (var v in _shapeVisuals.Values)     ShapeCanvas.Children.Remove(v);
             foreach (var e2 in _particleVisuals.Values) ShapeCanvas.Children.Remove(e2);
@@ -433,6 +482,10 @@ namespace StarTrekFanGame
             _shapeVisuals.Clear();
             _particleVisuals.Clear();
             _bulletVisuals.Clear();
+            foreach (var el in _enemyBulletVisuals.Values) ShapeCanvas.Children.Remove(el);
+            _enemyBulletVisuals.Clear();
+            foreach (var el in _shieldVisuals.Values)      ShapeCanvas.Children.Remove(el);
+            _shieldVisuals.Clear();
             _muzzleFlash = 0;
         }
 
@@ -546,12 +599,25 @@ namespace StarTrekFanGame
             Model.Gun.GunX = Math.Clamp(Model.Gun.GunX, 40, cw - 40);
             Model.Gun.GunY = Math.Clamp(Model.Gun.GunY, minY, maxY);
 
-            // -- 2. Machine-gun auto-fire — blocked during level transitions --
+            // -- 2. Gun tick (manages torpedo cooldowns / heat) ----------------
             Model.Gun.Tick();
-            if (_warpPhase == WarpPhase.None && FireHeld && Model.Gun.MachineGunMode && Model.Gun.CanFire())
+
+            // -- 2b. Phaser beam damage — applied every PhaserDamageEvery ticks --
+            bool phasersOn = _warpPhase == WarpPhase.None && FireHeld;
+            if (phasersOn)
             {
-                FireBullet();
-                Model.Gun.ResetFireCooldown();
+                _audio.StartPhaser();
+                if (_phaserDamageCooldown > 0) _phaserDamageCooldown--;
+                if (_phaserDamageCooldown == 0)
+                {
+                    ApplyPhaserDamage();
+                    _phaserDamageCooldown = PhaserDamageEvery;
+                }
+            }
+            else
+            {
+                _audio.StopPhaser();
+                _phaserDamageCooldown = 0;
             }
 
             // -- 3. Move shapes + wall bounce ---------------------------------
@@ -567,6 +633,10 @@ namespace StarTrekFanGame
                 if (s.Y + r > ch) { s.Y = ch - r;  s.VY = -Math.Abs(s.VY); }
                 if (s.Y - r < 0)  { s.Y = r;        s.VY =  Math.Abs(s.VY); }
             }
+
+            // -- 3b. Enemy AI (spawners, fighters, shield generators) ----------
+            if (_warpPhase == WarpPhase.None)
+                UpdateEnemyAI(cw, ch);
 
             // -- 4. Shape�shape elastic collisions ----------------------------
             for (int i = 0; i < Model.Shapes.Count; i++)
@@ -632,7 +702,8 @@ namespace StarTrekFanGame
                     if (dx * dx + dy * dy < hitR * hitR)
                     {
                         bullet.IsActive = false;
-                        shape.Hits--;
+                        if (shape.IsShielded) break; // shield absorbs the hit
+                        shape.Hits -= 2;  // photon torpedoes deal double damage
 
                         // Bigger enemies survive until their hits run out; each hit
                         // triggers a red flash (continuous once one hit from death).
@@ -646,7 +717,6 @@ namespace StarTrekFanGame
                         RemoveShapeVisual(shape);
                         CreateExplosion(shape.X, shape.Y);
                         Model.Score += 100;
-                        ScoreText.Text = $"Score: {Model.Score}";
                         break;
                     }
                 }
@@ -711,6 +781,40 @@ namespace StarTrekFanGame
             }
             if (_muzzleFlash > 0) _muzzleFlash--;
 
+            // -- 8c. Enemy bullet movement + player collision -----------------
+            double epx = Model.Gun.GunX;
+            double epy = Model.Gun.GunY;
+            double epr = ShipSize * 0.35;
+            for (int i = Model.EnemyBullets.Count - 1; i >= 0; i--)
+            {
+                var eb = Model.EnemyBullets[i];
+                if (!eb.IsActive) { RemoveEnemyBulletVisual(eb); Model.EnemyBullets.RemoveAt(i); continue; }
+
+                eb.X += eb.VX;
+                eb.Y += eb.VY;
+
+                // Out of bounds → deactivate.
+                if (eb.X < -20 || eb.X > cw + 20 || eb.Y < -20 || eb.Y > ch + 20)
+                {
+                    eb.IsActive = false;
+                    continue;
+                }
+
+                // Hit player → deal damage (respects invulnerability frames).
+                if (_invuln <= 0)
+                {
+                    double ddx = eb.X - epx;
+                    double ddy = eb.Y - epy;
+                    if (ddx * ddx + ddy * ddy < (epr + 5) * (epr + 5))
+                    {
+                        eb.IsActive = false;
+                        _health--;
+                        _invuln = 60;
+                        if (_health <= 0) GameOver();
+                    }
+                }
+            }
+
             // -- 8b. Level progression ----------------------------------------
             // Phase 1 (SlideToBase): ship glides to bottom-centre (movement driven
             // in section 1 above). Phase 2 (Hyperspace): background swaps to the
@@ -757,8 +861,73 @@ namespace StarTrekFanGame
             });
 
             _muzzleFlash = 3;
-            Model.Gun.AddHeat();      // machine-gun builds heat; rifle ignores it
+            Model.Gun.AddHeat();      // torpedo builds heat; phasers ignore it
             _audio.PlayTorpedo();
+        }
+
+        // Apply one tick of phaser damage to every enemy the beams intersect.
+        private void ApplyPhaserDamage()
+        {
+            double rad   = Model.Gun.Angle * Math.PI / 180.0;
+            double gx    = Model.Gun.GunX;
+            double gy    = Model.Gun.GunY;
+            double perpX = Math.Cos(rad);
+            double perpY = Math.Sin(rad);
+            double endX  = gx + Math.Sin(rad) * PhaserConvergeDist;
+            double endY  = gy - Math.Cos(rad) * PhaserConvergeDist;
+
+            double lx = gx - perpX * PhaserSpread;
+            double ly = gy - perpY * PhaserSpread;
+            double rx = gx + perpX * PhaserSpread;
+            double ry = gy + perpY * PhaserSpread;
+
+            for (int si = Model.Shapes.Count - 1; si >= 0; si--)
+            {
+                var    shape = Model.Shapes[si];
+                double hitR  = shape.CollisionRadius + 4;
+
+                if (!LineIntersectsCircle(lx, ly, endX, endY, shape.X, shape.Y, hitR) &&
+                    !LineIntersectsCircle(rx, ry, endX, endY, shape.X, shape.Y, hitR))
+                    continue;
+
+                if (shape.IsShielded) continue;  // shield deflects phaser beams
+
+                _phaserDamageTick ^= 1;
+                if (_phaserDamageTick != 0)   // skip every other tick -> half DPS
+                {
+                    shape.HitFlash = HitFlashFrames;
+                    continue;
+                }
+                shape.Hits--;
+                if (shape.Hits > 0)
+                {
+                    shape.HitFlash = HitFlashFrames;
+                    continue;
+                }
+
+                Model.Shapes.RemoveAt(si);
+                RemoveShapeVisual(shape);
+                CreateExplosion(shape.X, shape.Y);
+                Model.Score += 100;
+            }
+        }
+
+        // Returns true if the line segment AB intersects the circle at C with radius r.
+        private static bool LineIntersectsCircle(
+            double ax, double ay, double bx, double by,
+            double cx, double cy, double r)
+        {
+            double dx = bx - ax, dy = by - ay;
+            double fx = ax - cx, fy = ay - cy;
+            double a  = dx * dx + dy * dy;
+            double b  = 2 * (fx * dx + fy * dy);
+            double c  = fx * fx + fy * fy - r * r;
+            double disc = b * b - 4 * a * c;
+            if (disc < 0) return false;
+            double sq = Math.Sqrt(disc);
+            double t1 = (-b - sq) / (2 * a);
+            double t2 = (-b + sq) / (2 * a);
+            return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1) || (t1 <= 0 && t2 >= 1);
         }
 
         private void CreateExplosion(double x, double y)
@@ -780,6 +949,100 @@ namespace StarTrekFanGame
             }
 
             _audio.PlayExplosion();
+        }
+
+        // --------------------------------------------------------------------
+        //  ENEMY AI
+        // --------------------------------------------------------------------
+        private void UpdateEnemyAI(double cw, double ch)
+        {
+            // Pass 1: reset shield flags so they are recomputed fresh each tick.
+            foreach (var s in Model.Shapes)
+                s.IsShielded = false;
+
+            // Pass 2: shield generators mark nearby allies as shielded.
+            foreach (var gen in Model.Shapes)
+            {
+                if (gen.Role != EnemyRole.ShieldGenerator) continue;
+                foreach (var ally in Model.Shapes)
+                {
+                    if (ally == gen) continue;
+                    double dx = ally.X - gen.X;
+                    double dy = ally.Y - gen.Y;
+                    if (dx * dx + dy * dy <= ShieldRadius * ShieldRadius)
+                        ally.IsShielded = true;
+                }
+            }
+
+            // Pass 3: spawners and fighters act on their cooldowns.
+            double px = Model.Gun.GunX;
+            double py = Model.Gun.GunY;
+
+            // Collect new shapes spawned this tick (avoid mutating the list mid-loop).
+            List<GameShape>? newShapes = null;
+
+            foreach (var s in Model.Shapes)
+            {
+                if (s.ActionCooldown > 0) { s.ActionCooldown--; continue; }
+
+                switch (s.Role)
+                {
+                    case EnemyRole.Spawner:
+                        // Spawn a single fighter near the spawner.
+                        double spx = s.X + _rng.NextDouble() * 60 - 30;
+                        double spy = s.Y + _rng.NextDouble() * 60 - 30;
+                        spx = Math.Clamp(spx, 40, cw - 40);
+                        spy = Math.Clamp(spy, 40, ch * 0.7);
+                        double fSz  = SpawnSizeMin + (SpawnSizeMax - SpawnSizeMin) * 0.45; // medium
+                        double fAng = _rng.NextDouble() * Math.PI * 2;
+                        double fSpd = 1.2 + _rng.NextDouble() * 1.2;
+                        int    fType = _rng.Next(3);
+                        GameShape fighter = fType switch
+                        {
+                            0 => new Circle(spx, spy, fSz)                  { VX = Math.Cos(fAng) * fSpd, VY = Math.Sin(fAng) * fSpd, MaxHits = SizeTier(fSz, SphereSprites.Length) + 1 },
+                            1 => new RectShape(spx, spy, fSz * 1.5, fSz)    { VX = Math.Cos(fAng) * fSpd, VY = Math.Sin(fAng) * fSpd, MaxHits = SizeTier(fSz, CubeSprites.Length)   + 1 },
+                            _ => new TriangleShape(spx, spy, fSz)           { VX = Math.Cos(fAng) * fSpd, VY = Math.Sin(fAng) * fSpd, MaxHits = SizeTier(fSz, PyramidSprites.Length)+ 1 }
+                        };
+                        fighter.Hits          = fighter.MaxHits;
+                        fighter.Role          = EnemyRole.Fighter;
+                        fighter.ActionCooldown = _rng.Next(FighterCooldown, FighterCooldown * 2);
+                        newShapes ??= new List<GameShape>();
+                        newShapes.Add(fighter);
+                        s.ActionCooldown = SpawnerCooldown;
+                        break;
+
+                    case EnemyRole.Fighter:
+                        // Fire a spread of green energy bolts toward the player.
+                        double toDx = px - s.X;
+                        double toDy = py - s.Y;
+                        double dist = Math.Sqrt(toDx * toDx + toDy * toDy);
+                        if (dist > 0.1)
+                        {
+                            double baseAng  = Math.Atan2(toDy, toDx);
+                            double spreadArc = 0.35; // radians total spread
+                            for (int b = 0; b < FighterSpread; b++)
+                            {
+                                double offset = FighterSpread > 1
+                                    ? -spreadArc / 2 + spreadArc * b / (FighterSpread - 1)
+                                    : 0;
+                                double a = baseAng + offset;
+                                Model.EnemyBullets.Add(new EnemyBullet
+                                {
+                                    X  = s.X, Y  = s.Y,
+                                    VX = Math.Cos(a) * EnemyBulletSpeed,
+                                    VY = Math.Sin(a) * EnemyBulletSpeed
+                                });
+                            }
+                        }
+                        s.ActionCooldown = FighterCooldown + _rng.Next(30);
+                        break;
+                }
+            }
+
+            // Add any newly spawned shapes and create their visuals.
+            if (newShapes != null)
+                foreach (var ns in newShapes)
+                    Model.Shapes.Add(ns);
         }
 
         // --------------------------------------------------------------------
@@ -811,6 +1074,17 @@ namespace StarTrekFanGame
                 };
                 shape.Hits = shape.MaxHits;
 
+                // Assign enemy role based on size tier (uses 4-tier scale).
+                int tier = SizeTier(sz, 4);
+                shape.Role = tier switch
+                {
+                    >= SpawnerTier => EnemyRole.Spawner,
+                    FighterTier    => EnemyRole.Fighter,
+                    _              => EnemyRole.ShieldGenerator
+                };
+                // Stagger initial cooldowns so enemies don't all act at once.
+                shape.ActionCooldown = _rng.Next(60, 180);
+
                 Model.Shapes.Add(shape);
             }
         }
@@ -826,6 +1100,9 @@ namespace StarTrekFanGame
             SyncShapes();
             SyncParticles();
             SyncBullets();
+            SyncEnemyBullets();
+            SyncShieldOverlays();
+            SyncPhaserBeams();
             UpdateGun(cw, ch);
             UpdateHud(cw, ch);
         }
@@ -1018,7 +1295,198 @@ namespace StarTrekFanGame
             }
         }
 
-        // -- Player ship visual -----------------------------------------------
+        // -- Enemy bullets (green glowing ellipses) ----------------------------
+        private static readonly SolidColorBrush EnemyBulletBrush = Frozen(255, 0, 230, 60);
+
+        private void SyncEnemyBullets()
+        {
+            foreach (var eb in Model.EnemyBullets)
+            {
+                if (!eb.IsActive) continue;
+
+                if (!_enemyBulletVisuals.TryGetValue(eb, out var el))
+                {
+                    el = new Ellipse
+                    {
+                        Width  = 10,
+                        Height = 10,
+                        Fill   = EnemyBulletBrush,
+                        Effect = new DropShadowEffect
+                        {
+                            Color       = Color.FromRgb(0, 255, 80),
+                            ShadowDepth = 0,
+                            BlurRadius  = 14,
+                            Opacity     = 1.0
+                        }
+                    };
+                    _enemyBulletVisuals[eb] = el;
+                    Panel.SetZIndex(el, ZBullet);
+                    ShapeCanvas.Children.Add(el);
+                }
+
+                Canvas.SetLeft(el, eb.X - 5);
+                Canvas.SetTop(el,  eb.Y - 5);
+            }
+        }
+
+        private void RemoveEnemyBulletVisual(EnemyBullet eb)
+        {
+            if (_enemyBulletVisuals.Remove(eb, out var el))
+                ShapeCanvas.Children.Remove(el);
+        }
+
+        // -- Shield overlays (green glow ring over shielded enemies) ----------
+        private static readonly SolidColorBrush ShieldFill = Frozen(55, 0, 255, 100);
+        private static readonly SolidColorBrush ShieldStroke = Frozen(200, 0, 255, 120);
+
+        private void SyncShieldOverlays()
+        {
+            // Remove overlays for enemies that are no longer shielded or gone.
+            var toRemove = new List<GameShape>();
+            foreach (var kv in _shieldVisuals)
+            {
+                if (!Model.Shapes.Contains(kv.Key) || !kv.Key.IsShielded)
+                    toRemove.Add(kv.Key);
+            }
+            foreach (var key in toRemove)
+            {
+                ShapeCanvas.Children.Remove(_shieldVisuals[key]);
+                _shieldVisuals.Remove(key);
+            }
+
+            // Add/update overlays for currently shielded enemies.
+            foreach (var shape in Model.Shapes)
+            {
+                if (!shape.IsShielded) continue;
+
+                double r  = shape.CollisionRadius + 8;
+                double sz = r * 2;
+
+                if (!_shieldVisuals.TryGetValue(shape, out var shield))
+                {
+                    shield = new Ellipse
+                    {
+                        Stroke          = ShieldStroke,
+                        StrokeThickness = 3,
+                        Fill            = ShieldFill,
+                        Effect = new DropShadowEffect
+                        {
+                            Color       = Color.FromRgb(0, 220, 100),
+                            ShadowDepth = 0,
+                            BlurRadius  = 18,
+                            Opacity     = 0.9
+                        }
+                    };
+                    _shieldVisuals[shape] = shield;
+                    Panel.SetZIndex(shield, ZShape + 1);
+                    ShapeCanvas.Children.Add(shield);
+                }
+
+                // Pulse opacity slightly each frame using the frame counter.
+                shield.Opacity  = 0.65 + 0.25 * Math.Sin(_frame * 0.18);
+                shield.Width    = sz;
+                shield.Height   = sz;
+                Canvas.SetLeft(shield, shape.X - r);
+                Canvas.SetTop(shield,  shape.Y - r);
+            }
+        }
+        private void SyncPhaserBeams()
+        {
+            bool phasersOn = _warpPhase == WarpPhase.None && FireHeld;
+            if (!phasersOn)
+            {
+                _phaserBeamL.Visibility = _phaserBeamR.Visibility = Visibility.Collapsed;
+                _phaserCoreL.Visibility = _phaserCoreR.Visibility = Visibility.Collapsed;
+                _phaserImpL.Visibility  = _phaserImpR.Visibility  = Visibility.Collapsed;
+                return;
+            }
+
+            double rad   = Model.Gun.Angle * Math.PI / 180.0;
+            double gx    = Model.Gun.GunX;
+            double gy    = Model.Gun.GunY;
+            double perpX = Math.Cos(rad);
+            double perpY = Math.Sin(rad);
+
+            // Default convergence point (max beam reach).
+            double baseEndX = gx + Math.Sin(rad) * PhaserConvergeDist;
+            double baseEndY = gy - Math.Cos(rad) * PhaserConvergeDist;
+
+            // Wing-emitter start positions.
+            double lx = gx - perpX * PhaserSpread;
+            double ly = gy - perpY * PhaserSpread;
+            double rx = gx + perpX * PhaserSpread;
+            double ry = gy + perpY * PhaserSpread;
+
+            // Shorten each beam independently to stop at the nearest intersecting shape.
+            double tL = BeamFirstHitT(lx, ly, baseEndX, baseEndY);
+            double tR = BeamFirstHitT(rx, ry, baseEndX, baseEndY);
+
+            double lEndX = lx + tL * (baseEndX - lx);
+            double lEndY = ly + tL * (baseEndY - ly);
+            double rEndX = rx + tR * (baseEndX - rx);
+            double rEndY = ry + tR * (baseEndY - ry);
+
+            // Per-frame animation: outer flickers fast with organic wobble, core offset in phase.
+            double t          = _frame * 0.18;
+            double outerPulse = 0.70 + 0.30 * Math.Sin(t * 7.0 + Math.Sin(t * 3.1) * 1.2);
+            double corePulse  = 0.65 + 0.35 * Math.Sin(t * 7.0 + 1.1);
+            double impScale   = 0.70 + 0.60 * Math.Abs(Math.Sin(t * 8.0));
+
+            // Outer glow beams.
+            _phaserBeamL.X1 = lx;    _phaserBeamL.Y1 = ly;
+            _phaserBeamL.X2 = lEndX; _phaserBeamL.Y2 = lEndY;
+            _phaserBeamR.X1 = rx;    _phaserBeamR.Y1 = ry;
+            _phaserBeamR.X2 = rEndX; _phaserBeamR.Y2 = rEndY;
+            _phaserBeamL.Opacity = _phaserBeamR.Opacity = outerPulse;
+            _phaserBeamL.Visibility = _phaserBeamR.Visibility = Visibility.Visible;
+
+            // Inner bright core lines.
+            _phaserCoreL.X1 = lx;    _phaserCoreL.Y1 = ly;
+            _phaserCoreL.X2 = lEndX; _phaserCoreL.Y2 = lEndY;
+            _phaserCoreR.X1 = rx;    _phaserCoreR.Y1 = ry;
+            _phaserCoreR.X2 = rEndX; _phaserCoreR.Y2 = rEndY;
+            _phaserCoreL.Opacity = _phaserCoreR.Opacity = corePulse;
+            _phaserCoreL.Visibility = _phaserCoreR.Visibility = Visibility.Visible;
+
+            // Impact sparks at each beam's terminus.
+            const double impSz = 20.0;
+            Canvas.SetLeft(_phaserImpL, lEndX - impSz / 2);
+            Canvas.SetTop(_phaserImpL,  lEndY - impSz / 2);
+            Canvas.SetLeft(_phaserImpR, rEndX - impSz / 2);
+            Canvas.SetTop(_phaserImpR,  rEndY - impSz / 2);
+            ((ScaleTransform)_phaserImpL.RenderTransform).ScaleX = impScale;
+            ((ScaleTransform)_phaserImpL.RenderTransform).ScaleY = impScale;
+            ((ScaleTransform)_phaserImpR.RenderTransform).ScaleX = impScale;
+            ((ScaleTransform)_phaserImpR.RenderTransform).ScaleY = impScale;
+            _phaserImpL.Opacity = _phaserImpR.Opacity = outerPulse;
+            _phaserImpL.Visibility = _phaserImpR.Visibility = Visibility.Visible;
+        }
+
+        // Returns t ∈ [0,1] for the closest shape the segment (ax,ay)→(bx,by) hits, or 1.0.
+        private double BeamFirstHitT(double ax, double ay, double bx, double by)
+        {
+            double minT = 1.0;
+            double dx   = bx - ax;
+            double dy   = by - ay;
+            foreach (var shape in Model.Shapes)
+            {
+                double hitR = shape.CollisionRadius + 4;
+                double fx   = ax - shape.X;
+                double fy   = ay - shape.Y;
+                double a    = dx * dx + dy * dy;
+                double b    = 2 * (fx * dx + fy * dy);
+                double c    = fx * fx + fy * fy - hitR * hitR;
+                double disc = b * b - 4 * a * c;
+                if (disc < 0) continue;
+                double sq   = Math.Sqrt(disc);
+                double t1   = (-b - sq) / (2 * a);
+                double t2   = (-b + sq) / (2 * a);
+                // Use the nearest positive t on the segment; fall back to t2 if t1 is behind origin.
+                double tHit = (t1 >= 0) ? t1 : t2;
+                if (tHit >= 0 && tHit <= 1 && tHit < minT) minT = tHit;
+            }
+            return minT;
+        }
         // Returns the directional sprite matching the current WASD input.
         // Falls back to the last-used direction when no key is held.
         private BitmapImage PickMoveSprite()
@@ -1071,8 +1539,6 @@ namespace StarTrekFanGame
         // -- HUD overlay ------------------------------------------------------
         private void UpdateHud(double cw, double ch)
         {
-            bool mg = Model.Gun.MachineGunMode;
-
             if (_shownScore != Model.Score)
             {
                 _shownScore    = Model.Score;
@@ -1095,34 +1561,18 @@ namespace StarTrekFanGame
             }
             Canvas.SetLeft(_hudLevel, cw / 2 - 30);
 
-            if (!_shownMgInit || _shownMg != mg)
-            {
-                _shownMgInit        = true;
-                _shownMg            = mg;
-                _hudMode.Text       = mg ? "MACHINE GUN" : "RIFLE";
-                _hudMode.Foreground = mg ? Brushes.OrangeRed : Brushes.LightGreen;
-            }
-            Canvas.SetLeft(_hudMode, cw - 135);
+            // Heat gauge: always visible.
+            bool   over = Model.Gun.Overheated;
+            double heat = Model.Gun.Heat;
 
-            Canvas.SetLeft(_hudHint, cw - 270);
+            Canvas.SetLeft(_heatBg,   12); Canvas.SetTop(_heatBg,   88);
+            Canvas.SetLeft(_heatFill, 12); Canvas.SetTop(_heatFill, 88);
+            _heatFill.Width = heat * HeatBarW;
+            _heatFill.Fill  = over ? Brushes.Red : heat > 0.6 ? Brushes.Orange : Brushes.LightGreen;
 
-            // Heat gauge: only relevant for the machine gun.
-            Visibility heatVis = mg ? Visibility.Visible : Visibility.Collapsed;
-            _heatBg.Visibility = _heatFill.Visibility = _heatText.Visibility = heatVis;
-            if (mg)
-            {
-                bool   over = Model.Gun.Overheated;
-                double heat = Model.Gun.Heat;
-
-                Canvas.SetLeft(_heatBg,   12); Canvas.SetTop(_heatBg,   88);
-                Canvas.SetLeft(_heatFill, 12); Canvas.SetTop(_heatFill, 88);
-                _heatFill.Width = heat * HeatBarW;
-                _heatFill.Fill  = over ? Brushes.Red : heat > 0.6 ? Brushes.Orange : Brushes.Cyan;
-
-                _heatText.Text       = over ? "OVERHEAT!" : "HEAT";
-                _heatText.Foreground = over ? Brushes.Red : Brushes.LightGray;
-                Canvas.SetLeft(_heatText, 12); Canvas.SetTop(_heatText, 75);
-            }
+            _heatText.Text       = over ? "OVERHEAT!" : "TORPEDO";
+            _heatText.Foreground = over ? Brushes.Red : Brushes.LightGray;
+            Canvas.SetLeft(_heatText, 12); Canvas.SetTop(_heatText, 75);
 
             // Centre banner: game over takes priority, then the inter-level warp.
             if (_gameOver)
@@ -1189,8 +1639,8 @@ namespace StarTrekFanGame
                 case Key.Space:
                     _fireKeyHeld = true;
                     e.Handled    = true;
-                    // Rifle: fire once per press (ignore key-repeat)
-                    if (!e.IsRepeat && !Model.Gun.MachineGunMode && Model.Gun.CanFire())
+                    // Torpedo fires once per press; phasers are handled continuously by Step()
+                    if (!e.IsRepeat && _warpPhase == WarpPhase.None && Model.Gun.CanFire())
                     {
                         FireBullet();
                         Model.Gun.ResetFireCooldown();
@@ -1257,36 +1707,11 @@ namespace StarTrekFanGame
         // --------------------------------------------------------------------
         //  TOOLBAR HANDLERS
         // --------------------------------------------------------------------
-        private void SpawnButton_Click(object sender, RoutedEventArgs e)
-        {
-            SpawnShapes(6);
-            Render();
-        }
-
-        private void ClearButton_Click(object sender, RoutedEventArgs e)
-        {
-            NewGame();   // wipe the field, restore shields, restart at level 1
-            Render();
-        }
-
         private void PlayButton_Click(object sender, RoutedEventArgs e)
         {
             if (_gameOver) NewGame();   // a fresh game after defeat
             StartLoop();
         }
-        private void StepButton_Click(object sender, RoutedEventArgs e)  => StepOnce();
-        private void StopButton_Click(object sender, RoutedEventArgs e)  => StopLoop();
-
-        private void ShootButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (Model.Gun.CanFire())
-            {
-                FireBullet();
-                Model.Gun.ResetFireCooldown();
-                if (!_running) Render();
-            }
-        }
-
         private void RotateLeft_Click(object sender, RoutedEventArgs e)
         {
             Model.Gun.Angle = WrapAngle(Model.Gun.Angle - 10);
@@ -1337,19 +1762,7 @@ namespace StarTrekFanGame
         private void ShapeCanvas_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             _fireMouseHeld = true;
-            // Capture the mouse so the matching button-up is always delivered to
-            // the canvas, even if the cursor leaves it while held. Without this the
-            // release is lost and the machine gun keeps firing until the next click.
             ShapeCanvas.CaptureMouse();
-
-            // Rifle fires immediately on click; machine gun is handled by Step()
-            if (!Model.Gun.MachineGunMode && Model.Gun.CanFire())
-            {
-                FireBullet();
-                Model.Gun.ResetFireCooldown();
-                if (!_running) Render();
-            }
-            // Keep focus on window so A/D keyboard still works
             this.Focus();
         }
 
@@ -1359,6 +1772,24 @@ namespace StarTrekFanGame
             if (ShapeCanvas.IsMouseCaptured) ShapeCanvas.ReleaseMouseCapture();
         }
 
+        private void ShapeCanvas_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            // Right click fires a torpedo
+            if (_warpPhase == WarpPhase.None && Model.Gun.CanFire())
+            {
+                FireBullet();
+                Model.Gun.ResetFireCooldown();
+                if (!_running) Render();
+            }
+            e.Handled = true;
+            this.Focus();
+        }
+
+        private void ShapeCanvas_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            e.Handled = true;
+        }
+
         // Capture can also be lost without a button-up (e.g. focus stolen);
         // clear the hold so fire never latches on.
         private void ShapeCanvas_LostMouseCapture(object sender, MouseEventArgs e)
@@ -1366,23 +1797,6 @@ namespace StarTrekFanGame
             _fireMouseHeld = false;
         }
 
-        private void RifleButton_Click(object sender, RoutedEventArgs e)
-        {
-            Model.Gun.MachineGunMode    = false;
-            Model.Gun.ResetHeat();
-            RifleButton.FontWeight      = FontWeights.Bold;
-            MachineGunButton.FontWeight = FontWeights.Normal;
-            if (!_running) Render();
+            }
         }
-
-        private void MachineGunButton_Click(object sender, RoutedEventArgs e)
-        {
-            Model.Gun.MachineGunMode    = true;
-            Model.Gun.ResetHeat();
-            MachineGunButton.FontWeight = FontWeights.Bold;
-            RifleButton.FontWeight      = FontWeights.Normal;
-            if (!_running) Render();
-        }
-    }
-}
 
