@@ -1,0 +1,41 @@
+{
+  "group_id": null,
+  "objects": [
+    {
+      "id": "c69b0da3-9df5-490f-b169-48387def2c97",
+      "name": null,
+      "prompt": "Warp fuel cell",
+      "size": {
+        "width": 128,
+        "height": 128
+      },
+      "directions": 1,
+      "view": "low top-down",
+      "rotations": {
+        "unknown": "rotations/unknown.png"
+      },
+      "animations": {
+        "Pulse": {
+          "directions": {
+            "unknown": {
+              "frames": [
+                "animations/Pulse/unknown/frame_000.png",
+                "animations/Pulse/unknown/frame_001.png",
+                "animations/Pulse/unknown/frame_002.png",
+                "animations/Pulse/unknown/frame_003.png",
+                "animations/Pulse/unknown/frame_004.png",
+                "animations/Pulse/unknown/frame_005.png",
+                "animations/Pulse/unknown/frame_006.png",
+                "animations/Pulse/unknown/frame_007.png",
+                "animations/Pulse/unknown/frame_008.png"
+              ],
+              "frame_count": 9
+            }
+          }
+        }
+      }
+    }
+  ],
+  "export_version": "1.0",
+  "export_date": "2026-06-19T22:45:15.435454"
+}

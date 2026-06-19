@@ -138,8 +138,9 @@ namespace StarTrekFanGame
         private readonly Dictionary<Bullet, BulletVisual>        _bulletVisuals     = new();
         private readonly Dictionary<EnemyBullet, Ellipse>        _enemyBulletVisuals = new();
         private readonly Dictionary<GameShape, Ellipse>          _shieldVisuals     = new();
+        private readonly Dictionary<Powerup,    Image>            _powerupVisuals    = new();
 
-        // Shared, frozen sprite sources (loaded once).
+        // Shared, frozen sprite sources
         // Eight compass-direction ship sprites - one per WASD movement direction.
         private static readonly BitmapImage ShipN  = LoadImage("Assets/spaceship/spaceship/rotations/north.png");
         private static readonly BitmapImage ShipNE = LoadImage("Assets/spaceship/spaceship/rotations/north-east.png");
@@ -150,6 +151,18 @@ namespace StarTrekFanGame
         private static readonly BitmapImage ShipW  = LoadImage("Assets/spaceship/spaceship/rotations/west.png");
         private static readonly BitmapImage ShipNW = LoadImage("Assets/spaceship/spaceship/rotations/north-west.png");
         private static readonly BitmapImage TorpedoSprite = LoadImage("Assets/Ammo/torpedo.png");
+
+        // Warp fuel cell pickup animation frames (9-frame Pulse cycle).
+        private static readonly BitmapImage[] FuelCellFrames = LoadFuelCellFrames();
+        private static BitmapImage[] LoadFuelCellFrames()
+        {
+            var frames = new BitmapImage[9];
+            for (int i = 0; i < 9; i++)
+                frames[i] = LoadImage($"Assets/Warp_fuel_cell/Warp_fuel_cell/animations/Pulse/unknown/frame_{i:D3}.png");
+            return frames;
+        }
+
+        private const double PowerupDropChance = 0.45; // 45% drop rate from Spawners
 
         // Borg sprites: each 2D shape renders as its 3D Borg counterpart.
         //   Circle -> sphere,  Rectangle -> cube,  Triangle -> pyramid.
@@ -224,7 +237,7 @@ namespace StarTrekFanGame
         private int _phaserDamageCooldown = 0;
 
         // Z-order layers (Canvas draws by ZIndex, so insertion order no longer matters).
-        private const int ZShape = 0, ZParticle = 1, ZBullet = 2, ZGun = 3, ZHud = 4, ZReticle = 5;
+        private const int ZShape = 0, ZPowerup = 1, ZParticle = 2, ZBullet = 3, ZGun = 4, ZHud = 5, ZReticle = 6;
 
         // -- Aiming reticle ---------------------------------------------------
         //  Replaces the hard-to-see system "Cross" cursor with a bright, drawn
@@ -486,6 +499,9 @@ namespace StarTrekFanGame
             _enemyBulletVisuals.Clear();
             foreach (var el in _shieldVisuals.Values)      ShapeCanvas.Children.Remove(el);
             _shieldVisuals.Clear();
+            foreach (var el in _powerupVisuals.Values)     ShapeCanvas.Children.Remove(el);
+            _powerupVisuals.Clear();
+            Model.Powerups.Clear();
             _muzzleFlash = 0;
         }
 
@@ -716,6 +732,7 @@ namespace StarTrekFanGame
                         Model.Shapes.RemoveAt(si);
                         RemoveShapeVisual(shape);
                         CreateExplosion(shape.X, shape.Y);
+                        TryDropFuelCell(shape);
                         Model.Score += 100;
                         break;
                     }
@@ -815,6 +832,53 @@ namespace StarTrekFanGame
                 }
             }
 
+            // -- 8d. Powerup movement + pickup ------------------------------------
+            double ppx = Model.Gun.GunX;
+            double ppy = Model.Gun.GunY;
+            for (int i = Model.Powerups.Count - 1; i >= 0; i--)
+            {
+                var pu = Model.Powerups[i];
+
+                // Drift downward.
+                pu.Y += Powerup.DriftSpeed;
+
+                // Advance animation frame.
+                pu.FrameTick++;
+                if (pu.FrameTick >= Powerup.FrameInterval)
+                {
+                    pu.FrameTick = 0;
+                    pu.Frame = (pu.Frame + 1) % FuelCellFrames.Length;
+                }
+
+                // Remove if off-screen.
+                if (pu.Y > ch + 40)
+                {
+                    pu.IsActive = false;
+                    if (_powerupVisuals.TryGetValue(pu, out var remove))
+                    {
+                        ShapeCanvas.Children.Remove(remove);
+                        _powerupVisuals.Remove(pu);
+                    }
+                    Model.Powerups.RemoveAt(i);
+                    continue;
+                }
+
+                // Player pickup — fully restore shields.
+                double pdx = pu.X - ppx;
+                double pdy = pu.Y - ppy;
+                double pickupR = Powerup.CollisionRadius + ShipSize * 0.35;
+                if (pdx * pdx + pdy * pdy < pickupR * pickupR)
+                {
+                    _health = MaxHealth;
+                    if (_powerupVisuals.TryGetValue(pu, out var collected))
+                    {
+                        ShapeCanvas.Children.Remove(collected);
+                        _powerupVisuals.Remove(pu);
+                    }
+                    Model.Powerups.RemoveAt(i);
+                }
+            }
+
             // -- 8b. Level progression ----------------------------------------
             // Phase 1 (SlideToBase): ship glides to bottom-centre (movement driven
             // in section 1 above). Phase 2 (Hyperspace): background swaps to the
@@ -908,6 +972,7 @@ namespace StarTrekFanGame
                 Model.Shapes.RemoveAt(si);
                 RemoveShapeVisual(shape);
                 CreateExplosion(shape.X, shape.Y);
+                TryDropFuelCell(shape);
                 Model.Score += 100;
             }
         }
@@ -1102,6 +1167,7 @@ namespace StarTrekFanGame
             SyncBullets();
             SyncEnemyBullets();
             SyncShieldOverlays();
+            SyncPowerups();
             SyncPhaserBeams();
             UpdateGun(cw, ch);
             UpdateHud(cw, ch);
@@ -1390,6 +1456,44 @@ namespace StarTrekFanGame
                 Canvas.SetTop(shield,  shape.Y - r);
             }
         }
+
+        // Drop a warp fuel cell from a killed enemy if it was a Spawner-tier enemy.
+        private void TryDropFuelCell(GameShape shape)
+        {
+            if (shape.Role != EnemyRole.Spawner) return;
+            if (_rng.NextDouble() >= PowerupDropChance) return;
+
+            var pu = new Powerup { X = shape.X, Y = shape.Y };
+            Model.Powerups.Add(pu);
+        }
+
+        // Retained-visual sync for warp fuel cell pickups.
+        private void SyncPowerups()
+        {
+            foreach (var pu in Model.Powerups)
+            {
+                if (!_powerupVisuals.TryGetValue(pu, out var img))
+                {
+                    img = new Image
+                    {
+                        Width  = 44,
+                        Height = 44,
+                        Source = FuelCellFrames[pu.Frame]
+                    };
+                    _powerupVisuals[pu] = img;
+                    Panel.SetZIndex(img, ZPowerup);
+                    ShapeCanvas.Children.Add(img);
+                }
+                else
+                {
+                    img.Source = FuelCellFrames[pu.Frame];
+                }
+
+                Canvas.SetLeft(img, pu.X - 22);
+                Canvas.SetTop(img,  pu.Y - 22);
+            }
+        }
+
         private void SyncPhaserBeams()
         {
             bool phasersOn = _warpPhase == WarpPhase.None && FireHeld;
