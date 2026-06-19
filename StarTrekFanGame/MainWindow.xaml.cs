@@ -47,8 +47,14 @@ namespace StarTrekFanGame
         private int       _warpTimer = 0;
         private const int WarpSlideFrames      = 60;   // ticks to glide ship (~2 s at 30 fps)
         private const int WarpHyperspaceFrames = 90;   // ticks of hyperspace screen (~3 s)
-        private static readonly BitmapImage HyperspaceImage =
-            LoadImage("Assets/Backgrounds/hyperspace.png");
+        private static readonly BitmapImage  HyperspaceImage  = LoadImage("Assets/Backgrounds/hyperspace.png");
+        private static readonly ImageBrush   HyperspaceBrush  = MakeHyperspaceBrush();
+        private static ImageBrush MakeHyperspaceBrush()
+        {
+            var b = new ImageBrush(HyperspaceImage) { Stretch = Stretch.UniformToFill };
+            b.Freeze();
+            return b;
+        }
 
         private static readonly string[] BackgroundFiles =
         {
@@ -139,6 +145,15 @@ namespace StarTrekFanGame
         private readonly Dictionary<EnemyBullet, Ellipse>        _enemyBulletVisuals = new();
         private readonly Dictionary<GameShape, Ellipse>          _shieldVisuals     = new();
 
+        // Object pools – WPF elements are created once and recycled to avoid
+        // ShapeCanvas.Children.Add/Remove calls (which invalidate the visual tree)
+        // and to prevent GC pressure from per-bullet / per-particle allocations.
+        private readonly Stack<Ellipse> _enemyBulletPool = new();
+        private readonly Stack<Ellipse> _particlePool    = new();
+
+        // Pre-allocated list reused by SyncShieldOverlays each frame.
+        private readonly List<GameShape> _toRemoveShields = new();
+
         // Shared, frozen sprite sources (loaded once).
         // Eight compass-direction ship sprites - one per WASD movement direction.
         private static readonly BitmapImage ShipN  = LoadImage("Assets/spaceship/spaceship/rotations/north.png");
@@ -177,8 +192,11 @@ namespace StarTrekFanGame
         private const int SpawnerCooldown  = 300; // ticks between spawns (~10 s)
         private const int FighterCooldown  = 90;  // ticks between bursts (~3 s)
         private const int ShieldRadius     = 80;  // px — how close a generator must be to shield an ally
-        private const double EnemyBulletSpeed = 3.5;
-        private const int   FighterSpread  = 3;   // number of projectiles per burst
+        private const double EnemyBulletSpeed  = 3.5;
+        private const int   FighterSpread   = 3;   // number of projectiles per burst
+        private const int   MaxEnemyBullets = 10;  // hard cap – keeps frame rate stable
+        private const int   MaxParticles    = 50;  // cap total live particles across all explosions
+        private const int   ParticlePoolSize = 66; // 3 simultaneous explosions pre-created
 
         // Free-running frame counter, drives the continuous low-health flash.
         private int _frame;
@@ -254,6 +272,7 @@ namespace StarTrekFanGame
             InitializeComponent();
             BuildChrome();
             BuildReticle();
+            InitPools();
         }
 
         // Create the persistent player-ship + HUD visuals exactly once.
@@ -381,6 +400,44 @@ namespace StarTrekFanGame
             StrokeEndLineCap   = PenLineCap.Round
         };
 
+        // Pre-populate the enemy-bullet and particle pools so the game never has
+        // to call ShapeCanvas.Children.Add during normal play (only at pool exhaustion).
+        private void InitPools()
+        {
+            for (int i = 0; i < MaxEnemyBullets; i++)
+            {
+                var el = MakeEnemyBulletEllipse();
+                el.Visibility = Visibility.Collapsed;
+                Panel.SetZIndex(el, ZBullet);
+                ShapeCanvas.Children.Add(el);
+                _enemyBulletPool.Push(el);
+            }
+
+            for (int i = 0; i < ParticlePoolSize; i++)
+            {
+                var e = new Ellipse { Fill = ParticleFill, Visibility = Visibility.Collapsed };
+                Panel.SetZIndex(e, ZParticle);
+                ShapeCanvas.Children.Add(e);
+                _particlePool.Push(e);
+            }
+        }
+
+        // Shared factory so the pool initialiser and the fallback path create
+        // identical Ellipses (same Effect settings, same fill).
+        private static Ellipse MakeEnemyBulletEllipse() => new Ellipse
+        {
+            Width  = 10,
+            Height = 10,
+            Fill   = EnemyBulletBrush,
+            Effect = new DropShadowEffect
+            {
+                Color       = Color.FromRgb(0, 255, 80),
+                ShadowDepth = 0,
+                BlurRadius  = 14,
+                Opacity     = 1.0
+            }
+        };
+
         // -- Image / background helpers ---------------------------------------
         private static BitmapImage LoadImage(string relativePath)
         {
@@ -473,7 +530,8 @@ namespace StarTrekFanGame
             Model.EnemyBullets.Clear();
 
             foreach (var v in _shapeVisuals.Values)     ShapeCanvas.Children.Remove(v);
-            foreach (var e2 in _particleVisuals.Values) ShapeCanvas.Children.Remove(e2);
+            // Return pooled visuals to their pools (hide) instead of removing from canvas.
+            foreach (var e2 in _particleVisuals.Values) { e2.Visibility = Visibility.Collapsed; _particlePool.Push(e2); }
             foreach (var bv in _bulletVisuals.Values)
             {
                 ShapeCanvas.Children.Remove(bv.Trail);
@@ -482,7 +540,7 @@ namespace StarTrekFanGame
             _shapeVisuals.Clear();
             _particleVisuals.Clear();
             _bulletVisuals.Clear();
-            foreach (var el in _enemyBulletVisuals.Values) ShapeCanvas.Children.Remove(el);
+            // _enemyBulletVisuals already returned to pool by RemoveEnemyBulletVisual above.
             _enemyBulletVisuals.Clear();
             foreach (var el in _shieldVisuals.Values)      ShapeCanvas.Children.Remove(el);
             _shieldVisuals.Clear();
@@ -833,7 +891,7 @@ namespace StarTrekFanGame
                 Model.Gun.GunY   = ch - GunBaseOffset;
                 _warpPhase       = WarpPhase.Hyperspace;
                 _warpTimer       = WarpHyperspaceFrames;
-                ShapeCanvas.Background = new ImageBrush(HyperspaceImage) { Stretch = Stretch.UniformToFill };
+                ShapeCanvas.Background = HyperspaceBrush;
                 _ship.Visibility = Visibility.Collapsed;
             }
             else if (_warpPhase == WarpPhase.Hyperspace && --_warpTimer <= 0)
@@ -933,7 +991,8 @@ namespace StarTrekFanGame
         private void CreateExplosion(double x, double y)
         {
             const int N = 22;
-            for (int i = 0; i < N; i++)
+            int canAdd = Math.Min(N, MaxParticles - Model.Particles.Count);
+            for (int i = 0; i < canAdd; i++)
             {
                 double angle = i * (Math.PI * 2.0 / N) + _rng.NextDouble() * 0.35;
                 double spd   = 1.25 + _rng.NextDouble() * 2.75;
@@ -1016,7 +1075,7 @@ namespace StarTrekFanGame
                         double toDx = px - s.X;
                         double toDy = py - s.Y;
                         double dist = Math.Sqrt(toDx * toDx + toDy * toDy);
-                        if (dist > 0.1)
+                        if (dist > 0.1 && Model.EnemyBullets.Count < MaxEnemyBullets)
                         {
                             double baseAng  = Math.Atan2(toDy, toDx);
                             double spreadArc = 0.35; // radians total spread
@@ -1178,7 +1237,7 @@ namespace StarTrekFanGame
         private static Grid MakeSprite(BitmapImage source, double width, double height)
         {
             var img = new Image { Source = source, Stretch = Stretch.Uniform };
-            RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
+            RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.NearestNeighbor);
 
             var overlay = new Rectangle
             {
@@ -1207,10 +1266,18 @@ namespace StarTrekFanGame
             {
                 if (!_particleVisuals.TryGetValue(p, out var e))
                 {
-                    e = new Ellipse { Fill = ParticleFill };
+                    if (_particlePool.Count > 0)
+                    {
+                        e = _particlePool.Pop();
+                    }
+                    else
+                    {
+                        e = new Ellipse { Fill = ParticleFill };
+                        Panel.SetZIndex(e, ZParticle);
+                        ShapeCanvas.Children.Add(e);
+                    }
+                    e.Visibility = Visibility.Visible;
                     _particleVisuals[p] = e;
-                    Panel.SetZIndex(e, ZParticle);
-                    ShapeCanvas.Children.Add(e);
                 }
 
                 double t  = (double)p.Life / p.MaxLife;
@@ -1233,7 +1300,10 @@ namespace StarTrekFanGame
         private void RemoveParticleVisual(ExplosionParticle p)
         {
             if (_particleVisuals.Remove(p, out var e))
-                ShapeCanvas.Children.Remove(e);
+            {
+                e.Visibility = Visibility.Collapsed;
+                _particlePool.Push(e);
+            }
         }
 
         // -- Bullets  (torpedo sprite + yellow exhaust trail) -----------------
@@ -1306,22 +1376,19 @@ namespace StarTrekFanGame
 
                 if (!_enemyBulletVisuals.TryGetValue(eb, out var el))
                 {
-                    el = new Ellipse
+                    if (_enemyBulletPool.Count > 0)
                     {
-                        Width  = 10,
-                        Height = 10,
-                        Fill   = EnemyBulletBrush,
-                        Effect = new DropShadowEffect
-                        {
-                            Color       = Color.FromRgb(0, 255, 80),
-                            ShadowDepth = 0,
-                            BlurRadius  = 14,
-                            Opacity     = 1.0
-                        }
-                    };
+                        el = _enemyBulletPool.Pop();
+                    }
+                    else
+                    {
+                        // Pool exhausted (shouldn't happen normally): allocate and add.
+                        el = MakeEnemyBulletEllipse();
+                        Panel.SetZIndex(el, ZBullet);
+                        ShapeCanvas.Children.Add(el);
+                    }
+                    el.Visibility = Visibility.Visible;
                     _enemyBulletVisuals[eb] = el;
-                    Panel.SetZIndex(el, ZBullet);
-                    ShapeCanvas.Children.Add(el);
                 }
 
                 Canvas.SetLeft(el, eb.X - 5);
@@ -1332,7 +1399,10 @@ namespace StarTrekFanGame
         private void RemoveEnemyBulletVisual(EnemyBullet eb)
         {
             if (_enemyBulletVisuals.Remove(eb, out var el))
-                ShapeCanvas.Children.Remove(el);
+            {
+                el.Visibility = Visibility.Collapsed;
+                _enemyBulletPool.Push(el);
+            }
         }
 
         // -- Shield overlays (green glow ring over shielded enemies) ----------
@@ -1342,13 +1412,14 @@ namespace StarTrekFanGame
         private void SyncShieldOverlays()
         {
             // Remove overlays for enemies that are no longer shielded or gone.
-            var toRemove = new List<GameShape>();
+            // Reuse the pre-allocated list to avoid a heap allocation every frame.
+            _toRemoveShields.Clear();
             foreach (var kv in _shieldVisuals)
             {
                 if (!Model.Shapes.Contains(kv.Key) || !kv.Key.IsShielded)
-                    toRemove.Add(kv.Key);
+                    _toRemoveShields.Add(kv.Key);
             }
-            foreach (var key in toRemove)
+            foreach (var key in _toRemoveShields)
             {
                 ShapeCanvas.Children.Remove(_shieldVisuals[key]);
                 _shieldVisuals.Remove(key);
