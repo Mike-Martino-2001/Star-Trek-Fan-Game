@@ -207,7 +207,7 @@ namespace StarTrekFanGame
         private const int ShieldRadius     = 80;  // px — how close a generator must be to shield an ally
         private const double EnemyBulletSpeed  = 3.5;
         private const int   FighterSpread   = 3;   // number of projectiles per burst
-        private const int   MaxEnemyBullets = 10;  // hard cap – keeps frame rate stable
+        private const int   MaxEnemyBullets = 6;  // hard cap – keeps frame rate stable
         private const int   MaxParticles    = 50;  // cap total live particles across all explosions
         private const int   ParticlePoolSize = 66; // 3 simultaneous explosions pre-created
 
@@ -255,7 +255,7 @@ namespace StarTrekFanGame
         private int _phaserDamageCooldown = 0;
 
         // Z-order layers (Canvas draws by ZIndex, so insertion order no longer matters).
-        private const int ZShape = 0, ZPowerup = 1, ZParticle = 2, ZBullet = 3, ZGun = 4, ZHud = 5, ZReticle = 6;
+        private const int ZPowerup = 0, ZShape = 1, ZParticle = 2, ZBullet = 3, ZGun = 4, ZHud = 5, ZReticle = 6;
 
         // -- Aiming reticle ---------------------------------------------------
         //  Replaces the hard-to-see system "Cross" cursor with a bright, drawn
@@ -897,8 +897,14 @@ namespace StarTrekFanGame
             {
                 var pu = Model.Powerups[i];
 
-                // Drift downward.
-                pu.Y += Powerup.DriftSpeed;
+                // Move with inherited enemy velocity; bounce off all four edges.
+                pu.X += pu.VX;
+                pu.Y += pu.VY;
+                double pr = Powerup.CollisionRadius;
+                if (pu.X + pr > cw) { pu.X = cw - pr; pu.VX = -Math.Abs(pu.VX); }
+                if (pu.X - pr < 0)  { pu.X = pr;       pu.VX =  Math.Abs(pu.VX); }
+                if (pu.Y + pr > ch) { pu.Y = ch - pr;  pu.VY = -Math.Abs(pu.VY); }
+                if (pu.Y - pr < 0)  { pu.Y = pr;        pu.VY =  Math.Abs(pu.VY); }
 
                 // Advance animation frame.
                 pu.FrameTick++;
@@ -906,19 +912,6 @@ namespace StarTrekFanGame
                 {
                     pu.FrameTick = 0;
                     pu.Frame = (pu.Frame + 1) % FuelCellFrames.Length;
-                }
-
-                // Remove if off-screen.
-                if (pu.Y > ch + 40)
-                {
-                    pu.IsActive = false;
-                    if (_powerupVisuals.TryGetValue(pu, out var remove))
-                    {
-                        ShapeCanvas.Children.Remove(remove);
-                        _powerupVisuals.Remove(pu);
-                    }
-                    Model.Powerups.RemoveAt(i);
-                    continue;
                 }
 
                 // Player pickup — fully restore shields.
@@ -946,6 +939,23 @@ namespace StarTrekFanGame
                 _warpPhase      = WarpPhase.SlideToBase;
                 _warpTimer      = WarpSlideFrames;
                 _lastMoveSprite = ShipS;   // ship faces downward during the glide-out
+
+                // Destroy all lingering projectiles and powerups so the field is
+                // clean before the next level spawns.
+                foreach (var bv in _bulletVisuals.Values)
+                {
+                    ShapeCanvas.Children.Remove(bv.Trail);
+                    ShapeCanvas.Children.Remove(bv.Sprite);
+                }
+                _bulletVisuals.Clear();
+                Model.Bullets.Clear();
+
+                foreach (var eb in Model.EnemyBullets) RemoveEnemyBulletVisual(eb);
+                Model.EnemyBullets.Clear();
+
+                foreach (var el in _powerupVisuals.Values) ShapeCanvas.Children.Remove(el);
+                _powerupVisuals.Clear();
+                Model.Powerups.Clear();
             }
 
             if (_warpPhase == WarpPhase.SlideToBase && --_warpTimer <= 0)
@@ -1534,7 +1544,7 @@ namespace StarTrekFanGame
             if (shape.Role != EnemyRole.Spawner) return;
             if (_rng.NextDouble() >= PowerupDropChance) return;
 
-            var pu = new Powerup { X = shape.X, Y = shape.Y };
+            var pu = new Powerup { X = shape.X, Y = shape.Y, VX = shape.VX, VY = shape.VY };
             Model.Powerups.Add(pu);
         }
 
@@ -1549,7 +1559,14 @@ namespace StarTrekFanGame
                     {
                         Width  = 44,
                         Height = 44,
-                        Source = FuelCellFrames[pu.Frame]
+                        Source = FuelCellFrames[pu.Frame],
+                        Effect = new DropShadowEffect
+                        {
+                            Color       = Color.FromRgb(0, 140, 255),
+                            ShadowDepth = 0,
+                            BlurRadius  = 24,
+                            Opacity     = 0.9
+                        }
                     };
                     _powerupVisuals[pu] = img;
                     Panel.SetZIndex(img, ZPowerup);
